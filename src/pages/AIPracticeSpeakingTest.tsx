@@ -765,7 +765,7 @@ export default function AIPracticeSpeakingTest() {
     'test_ending'
   ]);
 
-  const speakText = (text: string, audioKey?: string) => {
+  const speakText = (rawText: unknown, audioKey?: string) => {
     // Stop anything currently happening (audio, TTS, retries) before starting a new prompt.
     stopPromptAudio();
 
@@ -773,6 +773,9 @@ export default function AIPracticeSpeakingTest() {
     const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     activeSpeakSessionRef.current = sessionId;
     ttsFallbackSessionRef.current = null;
+
+    // Always coerce to a safe string (fresh-generated tests sometimes have null/undefined instructions)
+    let text = typeof rawText === 'string' ? rawText : '';
 
     // For PRESET tests: check if this is an instruction key and use shared audio
     if (test?.isPreset && sharedAudioFetched && audioKey && SHARED_AUDIO_KEYS.has(audioKey)) {
@@ -797,6 +800,20 @@ export default function AIPracticeSpeakingTest() {
         console.log(`[AIPracticeSpeakingTest] Using fallback text for TTS (empty instruction): ${audioKey}`);
         text = sharedItem.fallback_text;
       }
+    }
+
+    // If we STILL don't have any text, do not call browser TTS (it won't fire onEnd for empty strings).
+    // Instead, auto-advance the state machine so the test doesn't get stuck.
+    if (!text || !text.trim()) {
+      console.warn(`[AIPracticeSpeakingTest] Empty prompt for ${audioKey ?? 'unknown'} - auto-advancing`);
+      setCurrentSpeakingText('');
+      setUsingDeviceAudio(false);
+      window.setTimeout(() => {
+        if (activeSpeakSessionRef.current === sessionId) {
+          handleTTSCompleteRef.current();
+        }
+      }, 0);
+      return;
     }
 
     // Try to play preset audio (from test.audioUrls) for question audio
