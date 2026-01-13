@@ -12,13 +12,21 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-// Model priority: Gemini 1.5 Flash first (fastest + free tier friendly)
+// Model priority: Gemini 2.0 Flash first (stable, high RPM), 2.5 Flash second, 1.5 Pro fallback
 const GEMINI_MODELS_FALLBACK_ORDER = [
-  'gemini-1.5-flash',
-  'gemini-2.0-flash-exp',
-  'gemini-flash-latest',
-  'gemini-1.5-pro',
+  'gemini-2.0-flash',       // Primary: Stable, high RPM
+  'gemini-2.5-flash',       // Secondary: Newer stable
+  'gemini-1.5-pro',         // Fallback: More capable but slower
 ];
+
+// Exponential backoff configuration
+const RETRY_CONFIG = {
+  maxRetries: 3,
+  initialDelayMs: 1000,
+  maxDelayMs: 8000,
+  backoffMultiplier: 2,
+  retryableStatuses: [429, 503, 504],
+};
 
 // DB-managed API key interface
 interface ApiKeyRecord {

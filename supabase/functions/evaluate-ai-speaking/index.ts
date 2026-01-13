@@ -26,13 +26,21 @@ function stableSpeakingQuestionId(partNumber: 1 | 2 | 3, idx: number, text: stri
   return `p${partNumber}-q${idx + 1}-${stableHashHex(text)}`;
 }
 
-// Model priority: Gemini 1.5 Flash first (fastest + free tier friendly)
+// Model priority: Gemini 2.0 Flash first (stable, high RPM), 2.5 Flash second, 1.5 Pro fallback
 const GEMINI_MODELS_FALLBACK_ORDER = [
-  'gemini-1.5-flash',
-  'gemini-2.0-flash-exp',
-  'gemini-flash-latest',
-  'gemini-1.5-pro',
+  'gemini-2.0-flash',       // Primary: Stable, high RPM
+  'gemini-2.5-flash',       // Secondary: Newer stable
+  'gemini-1.5-pro',         // Fallback: More capable but slower
 ];
+
+// Exponential backoff configuration
+const RETRY_CONFIG = {
+  maxRetries: 3,
+  initialDelayMs: 1000,
+  maxDelayMs: 8000,
+  backoffMultiplier: 2,
+  retryableStatuses: [429, 503, 504], // Rate limit, Service Unavailable, Gateway Timeout
+};
 
 // DB-managed API key interface
 interface ApiKeyRecord {
@@ -106,10 +114,25 @@ interface GeminiErrorInfo {
   isQuota: boolean;
   isRateLimit: boolean;
   isInvalidKey: boolean;
+  isModelNotFound: boolean;  // NEW: 404 model not found - don't mark key exhausted
+  isRetryable: boolean;      // NEW: Should retry with backoff
 }
 
 function classifyGeminiError(status: number, errorText: string): GeminiErrorInfo {
   const lower = errorText.toLowerCase();
+  
+  // 404 Model Not Found - DO NOT mark key as exhausted, just try next model
+  if (status === 404 || lower.includes('not found') || lower.includes('not_found')) {
+    return {
+      code: 'MODEL_NOT_FOUND',
+      userMessage: 'Model not available. Trying alternative model...',
+      isQuota: false,
+      isRateLimit: false,
+      isInvalidKey: false,
+      isModelNotFound: true,
+      isRetryable: false, // Don't retry same model, move to next
+    };
+  }
   
   if (status === 429 || lower.includes('quota') || lower.includes('resource_exhausted')) {
     return {
@@ -118,6 +141,8 @@ function classifyGeminiError(status: number, errorText: string): GeminiErrorInfo
       isQuota: true,
       isRateLimit: false,
       isInvalidKey: false,
+      isModelNotFound: false,
+      isRetryable: true, // Retry with backoff
     };
   }
   
@@ -128,6 +153,8 @@ function classifyGeminiError(status: number, errorText: string): GeminiErrorInfo
       isQuota: false,
       isRateLimit: true,
       isInvalidKey: false,
+      isModelNotFound: false,
+      isRetryable: true, // Retry with backoff
     };
   }
   
@@ -138,6 +165,8 @@ function classifyGeminiError(status: number, errorText: string): GeminiErrorInfo
       isQuota: false,
       isRateLimit: false,
       isInvalidKey: true,
+      isModelNotFound: false,
+      isRetryable: false,
     };
   }
   
@@ -148,16 +177,20 @@ function classifyGeminiError(status: number, errorText: string): GeminiErrorInfo
       isQuota: false,
       isRateLimit: false,
       isInvalidKey: false,
+      isModelNotFound: false,
+      isRetryable: false,
     };
   }
   
-  if (status === 503) {
+  if (status === 503 || status === 504) {
     return {
       code: 'SERVICE_UNAVAILABLE',
       userMessage: 'Gemini API is temporarily unavailable. Please try again in a few minutes.',
       isQuota: false,
       isRateLimit: false,
       isInvalidKey: false,
+      isModelNotFound: false,
+      isRetryable: true, // Retry with backoff
     };
   }
   
@@ -167,7 +200,20 @@ function classifyGeminiError(status: number, errorText: string): GeminiErrorInfo
     isQuota: false,
     isRateLimit: false,
     isInvalidKey: false,
+    isModelNotFound: false,
+    isRetryable: false,
   };
+}
+
+// Exponential backoff sleep helper
+async function sleepWithBackoff(attempt: number): Promise<void> {
+  const delay = Math.min(
+    RETRY_CONFIG.initialDelayMs * Math.pow(RETRY_CONFIG.backoffMultiplier, attempt),
+    RETRY_CONFIG.maxDelayMs
+  );
+  const jitter = delay * 0.2 * Math.random(); // Add 20% jitter
+  console.log(`[evaluate-ai-speaking] Retry attempt ${attempt + 1}, waiting ${Math.round(delay + jitter)}ms`);
+  await new Promise(resolve => setTimeout(resolve, delay + jitter));
 }
 
 interface EvaluationRequest {
@@ -202,6 +248,9 @@ type GeneratedTestPayload = {
   difficulty?: string;
   speakingParts?: SpeakingPart[];
 };
+
+// Declare EdgeRuntime for background processing
+declare const EdgeRuntime: { waitUntil?: (promise: Promise<void>) => void } | undefined;
 
 serve(async (req) => {
   const startTime = Date.now();
@@ -539,100 +588,121 @@ serve(async (req) => {
 
     console.log(`[evaluate-ai-speaking] Starting Gemini API call, timeout: ${GEMINI_TIMEOUT_MS}ms, using ${usingUserKey ? 'user key' : 'pool key'}`);
 
-    // Function to call Gemini with a specific API key
+    // Function to call Gemini with a specific API key (with retry and model fallback)
     async function callGemini(apiKey: string, poolKeyId?: string): Promise<{ success: boolean; shouldFallbackToPool?: boolean }> {
       for (const modelName of GEMINI_MODELS_FALLBACK_ORDER) {
         console.log(`[evaluate-ai-speaking] Attempting model: ${modelName}`);
         const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
-        try {
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
-          
-          const geminiResponse = await fetch(GEMINI_API_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            signal: controller.signal,
-            body: JSON.stringify({
-              contents,
-              generationConfig: {
-                temperature: 0.3,
-                maxOutputTokens: 12000,
-                responseMimeType: 'application/json',
-              },
-            }),
-          });
-          
-          clearTimeout(timeoutId);
-          console.log(`[evaluate-ai-speaking] Gemini ${modelName} response status: ${geminiResponse.status}`);
-
-          if (!geminiResponse.ok) {
-            const errorText = await geminiResponse.text();
-            console.error(`[evaluate-ai-speaking] Gemini ${modelName} error (${geminiResponse.status}):`, errorText.slice(0, 500));
+        // Retry loop with exponential backoff for retryable errors
+        for (let attempt = 0; attempt <= RETRY_CONFIG.maxRetries; attempt++) {
+          try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
             
-            lastError = classifyGeminiError(geminiResponse.status, errorText);
+            const geminiResponse = await fetch(GEMINI_API_URL, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              signal: controller.signal,
+              body: JSON.stringify({
+                contents,
+                generationConfig: {
+                  temperature: 0.3,
+                  maxOutputTokens: 12000,
+                  responseMimeType: 'application/json',
+                },
+              }),
+            });
             
-            // If using pool key and got quota/rate limit error, MARK AS QUOTA EXHAUSTED and try next key
-            if (poolKeyId && (lastError.isQuota || lastError.isRateLimit)) {
-              // Mark this key as quota exhausted for flash model - prevents reuse today
-              await markKeyQuotaExhaustedForFlash(supabaseService, poolKeyId);
-              await incrementKeyErrorCount(supabaseService, poolKeyId, false);
-              console.log(`[evaluate-ai-speaking] Key ${poolKeyId} marked as quota exhausted, will try next key`);
-              return { success: false }; // Signal to try next pool key
-            }
-            
-            // If invalid key in pool, deactivate it
-            if (poolKeyId && lastError.isInvalidKey) {
-              await incrementKeyErrorCount(supabaseService, poolKeyId, true);
-              return { success: false }; // Try next pool key
+            clearTimeout(timeoutId);
+            console.log(`[evaluate-ai-speaking] Gemini ${modelName} response status: ${geminiResponse.status}`);
+
+            if (!geminiResponse.ok) {
+              const errorText = await geminiResponse.text();
+              console.error(`[evaluate-ai-speaking] Gemini ${modelName} error (${geminiResponse.status}):`, errorText.slice(0, 500));
+              
+              lastError = classifyGeminiError(geminiResponse.status, errorText);
+              
+              // MODEL NOT FOUND (404): Just try next model, don't mark key exhausted
+              if (lastError.isModelNotFound) {
+                console.log(`[evaluate-ai-speaking] Model ${modelName} not found, trying next model...`);
+                break; // Break retry loop, try next model
+              }
+              
+              // RETRYABLE ERRORS (429, 503, 504): Retry with backoff before marking key exhausted
+              if (lastError.isRetryable && attempt < RETRY_CONFIG.maxRetries) {
+                await sleepWithBackoff(attempt);
+                continue; // Retry same model
+              }
+              
+              // If using pool key and got quota/rate limit error after retries, MARK AS QUOTA EXHAUSTED
+              if (poolKeyId && (lastError.isQuota || lastError.isRateLimit)) {
+                await markKeyQuotaExhaustedForFlash(supabaseService, poolKeyId);
+                await incrementKeyErrorCount(supabaseService, poolKeyId, false);
+                console.log(`[evaluate-ai-speaking] Key ${poolKeyId} marked as quota exhausted after ${attempt + 1} attempts, will try next key`);
+                return { success: false }; // Signal to try next pool key
+              }
+              
+              // If invalid key in pool, deactivate it
+              if (poolKeyId && lastError.isInvalidKey) {
+                await incrementKeyErrorCount(supabaseService, poolKeyId, true);
+                return { success: false }; // Try next pool key
+              }
+
+              // For user key quota/rate limit, signal to fallback to pool
+              if (usingUserKey && (lastError.isQuota || lastError.isRateLimit)) {
+                console.log('[evaluate-ai-speaking] User key quota/rate limited, will try pool keys');
+                return { success: false, shouldFallbackToPool: true };
+              }
+
+              // For invalid user key, fail with specific message
+              if (usingUserKey && lastError.isInvalidKey) {
+                throw new Error(lastError.userMessage);
+              }
+
+              break; // Try next model
             }
 
-            // For user key quota/rate limit, signal to fallback to pool
-            if (usingUserKey && (lastError.isQuota || lastError.isRateLimit)) {
-              console.log('[evaluate-ai-speaking] User key quota/rate limited, will try pool keys');
-              return { success: false, shouldFallbackToPool: true };
+            const data = await geminiResponse.json();
+            const responseText = data?.candidates?.[0]?.content?.parts
+              ?.map((p: any) => p?.text)
+              .filter(Boolean)
+              .join('\n');
+
+            if (!responseText) {
+              console.error(`[evaluate-ai-speaking] No response text from ${modelName}`);
+              break; // Try next model
             }
 
-            // For invalid user key, fail with specific message
-            if (usingUserKey && lastError.isInvalidKey) {
-              throw new Error(lastError.userMessage);
+            evaluationRaw = parseJsonFromResponse(responseText);
+            if (evaluationRaw) {
+              usedModel = modelName;
+              // Reset error count on success for pool keys
+              if (poolKeyId) {
+                await resetKeyErrorCount(supabaseService, poolKeyId);
+              }
+              console.log(`[evaluate-ai-speaking] Successfully evaluated with model: ${modelName}`);
+              return { success: true };
             }
-
-            continue; // Try next model
+            break; // No valid JSON, try next model
+          } catch (err: any) {
+            if (err.name === 'AbortError') {
+              console.error(`[evaluate-ai-speaking] Timeout with model ${modelName} (attempt ${attempt + 1})`);
+              lastError = { code: 'TIMEOUT', userMessage: 'Request timed out. Please try again.', isQuota: false, isRateLimit: false, isInvalidKey: false, isModelNotFound: false, isRetryable: true };
+              
+              // Retry timeout with backoff
+              if (attempt < RETRY_CONFIG.maxRetries) {
+                await sleepWithBackoff(attempt);
+                continue;
+              }
+            } else if (err.message) {
+              // Propagate specific error messages
+              throw err;
+            } else {
+              console.error(`[evaluate-ai-speaking] Error with model ${modelName}:`, err);
+            }
+            break; // Try next model
           }
-
-          const data = await geminiResponse.json();
-          const responseText = data?.candidates?.[0]?.content?.parts
-            ?.map((p: any) => p?.text)
-            .filter(Boolean)
-            .join('\n');
-
-          if (!responseText) {
-            console.error(`[evaluate-ai-speaking] No response text from ${modelName}`);
-            continue;
-          }
-
-          evaluationRaw = parseJsonFromResponse(responseText);
-          if (evaluationRaw) {
-            usedModel = modelName;
-            // Reset error count on success for pool keys
-            if (poolKeyId) {
-              await resetKeyErrorCount(supabaseService, poolKeyId);
-            }
-            console.log(`[evaluate-ai-speaking] Successfully evaluated with model: ${modelName}`);
-            return { success: true };
-          }
-        } catch (err: any) {
-          if (err.name === 'AbortError') {
-            console.error(`[evaluate-ai-speaking] Timeout with model ${modelName}`);
-            lastError = { code: 'TIMEOUT', userMessage: 'Request timed out. Please try again.', isQuota: false, isRateLimit: false, isInvalidKey: false };
-          } else if (err.message) {
-            // Propagate specific error messages
-            throw err;
-          } else {
-            console.error(`[evaluate-ai-speaking] Error with model ${modelName}:`, err);
-          }
-          continue;
         }
       }
       return { success: false };

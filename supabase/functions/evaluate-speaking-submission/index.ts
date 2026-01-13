@@ -41,12 +41,21 @@ interface ApiKeyRecord {
   error_count: number;
 }
 
-// Model priority configuration (Fastest + Free first)
+// Model priority: Gemini 2.0 Flash first (stable, high RPM), 2.5 Flash second, 1.5 Pro fallback
 const GEMINI_MODELS = [
-  'gemini-1.5-flash',      // Primary (Fast, free tier friendly)
-  'gemini-2.0-flash-exp',  // Secondary
-  'gemini-1.5-pro',        // Fallback (More capable)
+  'gemini-2.0-flash',       // Primary: Stable, high RPM
+  'gemini-2.5-flash',       // Secondary: Newer stable
+  'gemini-1.5-pro',         // Fallback: More capable but slower
 ];
+
+// Exponential backoff configuration
+const RETRY_CONFIG = {
+  maxRetries: 3,
+  initialDelayMs: 1000,
+  maxDelayMs: 8000,
+  backoffMultiplier: 2,
+  retryableStatuses: [429, 503, 504],
+};
 
 // Custom error class for quota exhaustion
 class QuotaError extends Error {
