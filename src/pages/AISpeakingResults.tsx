@@ -133,35 +133,38 @@ function normalizeEvaluationReport(raw: any): EvaluationReport {
 
   const asArray = <T,>(v: any): T[] => (Array.isArray(v) ? v : []);
 
-  // Accept multiple shapes:
-  // - New UI-friendly: { fluency_coherence: { score, feedback, ... } }
-  // - Gemini async current: { criteria: { fluency_coherence: { band, feedback } ... }, overall_band }
-  const fromCriteria = (key: string) => {
-    const c = raw?.criteria?.[key];
-    if (!c) return null;
-    return {
-      score: toNumber(c?.band ?? c?.score, 0),
-      feedback: typeof c?.feedback === 'string' ? c.feedback : undefined,
-      examples: [],
-      strengths: [],
-      weaknesses: [],
-      suggestions: [],
-    } as Partial<CriterionScore>;
+  // Handle criteria nested under .criteria or at root level
+  const getCriterion = (key: string) => {
+    // First check in criteria wrapper
+    const fromCriteria = raw?.criteria?.[key];
+    // Then check at root level (some Gemini responses put it here)
+    const fromRoot = raw?.[key];
+    return fromCriteria || fromRoot;
   };
 
-  const normalizeCriterion = (v: any, criteriaKey?: string): CriterionScore => {
-    const fromC = criteriaKey ? fromCriteria(criteriaKey) : null;
-    const merged = fromC ? { ...v, ...fromC } : v;
+  const normalizeCriterion = (key: string): CriterionScore => {
+    const v = getCriterion(key);
+    if (!v) {
+      return {
+        score: 0,
+        feedback: undefined,
+        examples: [],
+        strengths: [],
+        weaknesses: [],
+        suggestions: [],
+      };
+    }
 
-    const feedback = typeof merged?.feedback === 'string' ? merged.feedback : undefined;
-    const examples = asArray<string>(merged?.examples);
-
-    const strengths = asArray<string>(merged?.strengths);
-    const weaknesses = asArray<string>(merged?.weaknesses ?? merged?.errors);
-    const suggestions = asArray<string>(merged?.suggestions ?? merged?.notes);
+    // Handle both "band" and "score" keys (Gemini sometimes uses either)
+    const score = toNumber(v?.band ?? v?.score, 0);
+    const feedback = typeof v?.feedback === 'string' ? v.feedback : undefined;
+    const examples = asArray<string>(v?.examples);
+    const strengths = asArray<string>(v?.strengths);
+    const weaknesses = asArray<string>(v?.weaknesses ?? v?.errors);
+    const suggestions = asArray<string>(v?.suggestions ?? v?.notes);
 
     return {
-      score: toNumber(merged?.score ?? merged?.band, 0),
+      score,
       feedback,
       examples,
       strengths: strengths.length ? strengths : examples,
@@ -210,22 +213,21 @@ function normalizeEvaluationReport(raw: any): EvaluationReport {
     if (direct.length) return direct;
     // Also try extracting from criteria strengths as fallback
     const criteriaStrengths: string[] = [];
-    const c = raw?.criteria;
-    if (c) {
-      if (c.fluency_coherence?.strengths) criteriaStrengths.push(...asArray<string>(c.fluency_coherence.strengths).slice(0, 1));
-      if (c.lexical_resource?.strengths) criteriaStrengths.push(...asArray<string>(c.lexical_resource.strengths).slice(0, 1));
-      if (c.grammatical_range?.strengths) criteriaStrengths.push(...asArray<string>(c.grammatical_range.strengths).slice(0, 1));
-      if (c.pronunciation?.strengths) criteriaStrengths.push(...asArray<string>(c.pronunciation.strengths).slice(0, 1));
+    for (const key of ['fluency_coherence', 'lexical_resource', 'grammatical_range', 'pronunciation']) {
+      const c = getCriterion(key);
+      if (c?.strengths && Array.isArray(c.strengths) && c.strengths.length > 0) {
+        criteriaStrengths.push(c.strengths[0]);
+      }
     }
     return criteriaStrengths.length ? criteriaStrengths : direct;
   })();
 
   return {
     overall_band: overallBand,
-    fluency_coherence: normalizeCriterion(raw?.fluency_coherence ?? raw?.fluencyCoherence, 'fluency_coherence'),
-    lexical_resource: normalizeCriterion(raw?.lexical_resource ?? raw?.lexicalResource, 'lexical_resource'),
-    grammatical_range: normalizeCriterion(raw?.grammatical_range ?? raw?.grammaticalRange, 'grammatical_range'),
-    pronunciation: normalizeCriterion(raw?.pronunciation, 'pronunciation'),
+    fluency_coherence: normalizeCriterion('fluency_coherence'),
+    lexical_resource: normalizeCriterion('lexical_resource'),
+    grammatical_range: normalizeCriterion('grammatical_range'),
+    pronunciation: normalizeCriterion('pronunciation'),
     lexical_upgrades: lexicalUpgrades,
     part_analysis: partAnalysis,
     improvement_priorities: asArray<string>(raw?.improvement_priorities ?? raw?.priorityImprovements ?? raw?.improvements),

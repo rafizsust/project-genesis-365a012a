@@ -140,182 +140,74 @@ function buildPrompt(
   const questionJson = JSON.stringify(questions);
   const segmentJson = JSON.stringify(orderedSegments);
   
-  // Determine which parts are included
   const includedParts = [...new Set(orderedSegments.map(s => s.partNumber))].sort();
   const partsDescription = includedParts.length === 1 
     ? `Part ${includedParts[0]} only` 
     : `Parts ${includedParts.join(', ')}`;
 
-  return [
-    `You are a SENIOR IELTS Speaking examiner with 15+ years experience, evaluating according to 2025 official band descriptors.`,
-    `Your role: Provide COMPREHENSIVE, DETAILED evaluation for EVERY recorded question like an expert mentor.`,
-    ``,
-    `TEST CONTEXT:`,
-    `- Topic: ${topic || 'General'}`,
-    `- Difficulty: ${difficulty || 'Medium'}`,
-    `- Parts included: ${partsDescription} (ONLY evaluate these parts - do not include other parts!)`,
-    `- Total questions to evaluate: ${orderedSegments.length}`,
-    fluencyFlag
-      ? `- ⚠️ Part 2 speaking was under 80 seconds; this MUST be reflected in Fluency & Coherence scoring.`
-      : null,
-    ``,
-    `═══════════════════════════════════════════════════════════════════`,
-    `CRITICAL REQUIREMENTS - YOU MUST FOLLOW ALL:`,
-    `═══════════════════════════════════════════════════════════════════`,
-    ``,
-    `1. COMPLETE COVERAGE (MANDATORY):`,
-    `   - You MUST provide evaluation for EVERY question in segment_map_json (${orderedSegments.length} questions total)`,
-    `   - transcripts_by_question MUST have entries for ALL ${orderedSegments.length} questions`,
-    `   - modelAnswers array MUST have exactly ${orderedSegments.length} entries (one per question)`,
-    `   - If audio is unclear, transcribe what you can hear and mark unclear parts as "(inaudible)"`,
-    ``,
-    `2. ACCURATE PART LABELING:`,
-    `   - ONLY include parts that exist in segment_map_json: ${includedParts.join(', ')}`,
-    `   - Do NOT add Part 2 or Part 3 if they are not in the segments`,
-    `   - Each modelAnswer must have correct partNumber matching the segment`,
-    ``,
-    `3. MODEL ANSWER TARGETING (MENTORSHIP APPROACH):`,
-    `   For EACH question individually:`,
-    `   - Assess the specific response quality and assign estimatedBand (can be 4.0, 4.5, 5.0, 5.5, 6.0, etc.)`,
-    `   - Set targetBand = ONE band higher than estimatedBand (rounded up to nearest whole number)`,
-    `   - Provide a model answer at EXACTLY that target level`,
-    `   Examples:`,
-    `     • estimatedBand 4.5 → targetBand 6, provide Band 6 model answer`,
-    `     • estimatedBand 5.0 → targetBand 6, provide Band 6 model answer`,
-    `     • estimatedBand 5.5 → targetBand 6, provide Band 6 model answer`,
-    `     • estimatedBand 6.0 → targetBand 7, provide Band 7 model answer`,
-    `     • estimatedBand 6.5 → targetBand 7, provide Band 7 model answer`,
-    `     • estimatedBand 7.0 → targetBand 8, provide Band 8 model answer`,
-    `     • estimatedBand 8.0+ → targetBand 9, provide Band 9 model answer`,
-    ``,
-    `4. EXPERT EXAMINER ANALYSIS (HOLISTIC VIEW):`,
-    `   Analyze patterns ACROSS all responses:`,
-    `   - Repeated vocabulary/phrases used across questions (e.g., always saying "I think", "very good")`,
-    `   - Filler word patterns (um, uh, like, you know)`,
-    `   - Grammar errors that repeat (subject-verb agreement, tense consistency)`,
-    `   - Pronunciation patterns (specific sounds, word stress, intonation)`,
-    `   - Response length and depth patterns`,
-    `   - Coherence and logical flow across the test`,
-    ``,
-    `5. SCORING ACCURACY:`,
-    `   - Short responses (1-10 words) = Band 4.0-4.5 maximum`,
-    `   - Off-topic or minimal content = severe band penalty`,
-    `   - overall_band = weighted average: Part 2 weight 2.0, Part 3 weight 1.5, Part 1 weight 1.0`,
-    `   - Criteria bands should be consistent with overall_band (±1.0 max)`,
-    ``,
-    `═══════════════════════════════════════════════════════════════════`,
-    `OUTPUT SCHEMA (Return STRICT JSON only, no markdown):`,
-    `═══════════════════════════════════════════════════════════════════`,
-    `{`,
-    `  "overall_band": 6.5,`,
-    `  "criteria": {`,
-    `    "fluency_coherence": {`,
-    `      "band": 6.5,`,
-    `      "feedback": "Detailed 2-3 sentence assessment...",`,
-    `      "strengths": ["Specific strength 1", "Specific strength 2", "...at least 2-3"],`,
-    `      "weaknesses": ["Specific weakness 1", "Specific weakness 2", "...at least 2-3"],`,
-    `      "suggestions": ["Actionable tip 1", "Actionable tip 2", "...at least 2-3"]`,
-    `    },`,
-    `    "lexical_resource": {`,
-    `      "band": 6.5,`,
-    `      "feedback": "Detailed assessment...",`,
-    `      "strengths": ["..."],`,
-    `      "weaknesses": ["..."],`,
-    `      "suggestions": ["..."]`,
-    `    },`,
-    `    "grammatical_range": {`,
-    `      "band": 6.5,`,
-    `      "feedback": "Detailed assessment...",`,
-    `      "strengths": ["..."],`,
-    `      "weaknesses": ["..."],`,
-    `      "suggestions": ["..."]`,
-    `    },`,
-    `    "pronunciation": {`,
-    `      "band": 6.5,`,
-    `      "feedback": "Detailed assessment...",`,
-    `      "strengths": ["..."],`,
-    `      "weaknesses": ["..."],`,
-    `      "suggestions": ["..."]`,
-    `    }`,
-    `  },`,
-    `  "summary": "2-4 sentence expert summary of overall performance, noting key patterns observed across all responses",`,
-    `  "lexical_upgrades": [`,
-    `    {"original": "good", "upgraded": "beneficial/advantageous", "context": "This is good for health → This is highly beneficial for one's well-being"},`,
-    `    {"original": "...", "upgraded": "...", "context": "..."},`,
-    `    "...provide 5-10 vocabulary upgrades from candidate's actual speech"`,
-    `  ],`,
-    `  "part_analysis": [`,
-    `    {`,
-    `      "part_number": 1,`,
-    `      "performance_notes": "Detailed analysis of how candidate performed in this part...",`,
-    `      "key_moments": ["Positive moment 1", "Positive moment 2"],`,
-    `      "areas_for_improvement": ["Specific improvement 1", "Specific improvement 2"]`,
-    `    }`,
-    `  ],`,
-    `  "improvement_priorities": [`,
-    `    "Priority 1: Most impactful improvement with specific example",`,
-    `    "Priority 2: Second most impactful...",`,
-    `    "Priority 3: ...",`,
-    `    "Priority 4: ...",`,
-    `    "Priority 5: ..."`,
-    `  ],`,
-    `  "strengths_to_maintain": [`,
-    `    "Strength 1: What candidate does well with example",`,
-    `    "Strength 2: ...",`,
-    `    "Strength 3: ..."`,
-    `  ],`,
-    `  "transcripts_by_part": {`,
-    `    "1": "Full concatenated transcript for Part 1...",`,
-    `    "2": "Full transcript for Part 2 if included...",`,
-    `    "3": "Full transcript for Part 3 if included..."`,
-    `  },`,
-    `  "transcripts_by_question": {`,
-    `    "1": [`,
-    `      {"segment_key": "part1-q...", "question_number": 1, "question_text": "...", "transcript": "Full transcript of candidate's answer..."},`,
-    `      {"segment_key": "part1-q...", "question_number": 2, "question_text": "...", "transcript": "..."},`,
-    `      "...ONE ENTRY FOR EACH QUESTION IN PART 1"`,
-    `    ],`,
-    `    "2": ["...if Part 2 was included"],`,
-    `    "3": ["...if Part 3 was included"]`,
-    `  },`,
-    `  "modelAnswers": [`,
-    `    {`,
-    `      "segment_key": "part1-q...",`,
-    `      "partNumber": 1,`,
-    `      "questionNumber": 1,`,
-    `      "question": "What is your daily routine?",`,
-    `      "candidateResponse": "Full transcript of what candidate said...",`,
-    `      "estimatedBand": 5.5,`,
-    `      "targetBand": 6,`,
-    `      "modelAnswer": "A comprehensive Band 6 model answer (80-120 words) demonstrating the target level...",`,
-    `      "whyItWorks": [`,
-    `        "Uses topic-specific vocabulary appropriately",`,
-    `        "Demonstrates clear organization with discourse markers",`,
-    `        "Shows some complexity in sentence structure",`,
-    `        "...3-5 specific features that make this a Band 6 answer"`,
-    `      ],`,
-    `      "keyImprovements": [`,
-    `        "Add more specific examples from personal experience",`,
-    `        "Use more varied vocabulary instead of repeating 'good' and 'nice'",`,
-    `        "Include discourse markers like 'furthermore', 'in addition'",`,
-    `        "...2-4 specific, actionable improvements"`,
-    `      ]`,
-    `    },`,
-    `    "...MUST HAVE ${orderedSegments.length} ENTRIES - ONE FOR EACH RECORDED QUESTION"`,
-    `  ]`,
-    `}`,
-    ``,
-    `═══════════════════════════════════════════════════════════════════`,
-    `INPUT DATA:`,
-    `═══════════════════════════════════════════════════════════════════`,
-    `questions_json: ${questionJson}`,
-    ``,
-    `segment_map_json (THE SOURCE OF TRUTH - ${orderedSegments.length} segments to evaluate): ${segmentJson}`,
-    ``,
-    `REMINDER: Your modelAnswers array MUST have exactly ${orderedSegments.length} entries. Do not skip any questions!`,
+  const numQ = orderedSegments.length;
+
+  return `You are a SENIOR IELTS Speaking examiner. Return ONLY valid JSON, no markdown.
+
+CONTEXT: Topic: ${topic || 'General'}, Difficulty: ${difficulty || 'Medium'}, Parts: ${partsDescription}, Questions: ${numQ}
+${fluencyFlag ? '⚠️ Part 2 under 80s - penalize Fluency & Coherence.' : ''}
+
+MANDATORY REQUIREMENTS:
+1. Listen to ALL ${numQ} audio files and transcribe EACH one fully
+2. Provide band scores (use "band" key, not "score") for ALL 4 criteria
+3. Create modelAnswers array with EXACTLY ${numQ} entries - one for each audio
+4. Include transcripts_by_question with ALL ${numQ} question transcripts
+5. All band scores must be between 1.0 and 9.0 (not zero!)
+
+SCORING:
+- Short responses (1-10 words) = Band 4.0-4.5 max
+- Overall band = weighted average (Part2 x2.0, Part3 x1.5, Part1 x1.0)
+
+MODEL ANSWERS: estimatedBand = candidate's level, targetBand = next whole band up
+Example: estimatedBand 5.5 → targetBand 6 → provide Band 6 model answer
+
+EXACT JSON SCHEMA (follow precisely):
+{
+  "overall_band": 6.0,
+  "criteria": {
+    "fluency_coherence": {"band": 6.0, "feedback": "2-3 sentence assessment", "strengths": ["strength1", "strength2"], "weaknesses": ["weakness1"], "suggestions": ["tip1", "tip2"]},
+    "lexical_resource": {"band": 6.0, "feedback": "...", "strengths": [...], "weaknesses": [...], "suggestions": [...]},
+    "grammatical_range": {"band": 5.5, "feedback": "...", "strengths": [...], "weaknesses": [...], "suggestions": [...]},
+    "pronunciation": {"band": 6.0, "feedback": "...", "strengths": [...], "weaknesses": [...], "suggestions": [...]}
+  },
+  "summary": "2-4 sentence overall performance summary",
+  "lexical_upgrades": [{"original": "good", "upgraded": "beneficial", "context": "example sentence"}],
+  "part_analysis": [{"part_number": 1, "performance_notes": "analysis...", "key_moments": ["..."], "areas_for_improvement": ["..."]}],
+  "improvement_priorities": ["Priority 1: ...", "Priority 2: ..."],
+  "strengths_to_maintain": ["Strength 1: ...", "Strength 2: ..."],
+  "transcripts_by_part": {"1": "Full concatenated transcript for Part 1..."},
+  "transcripts_by_question": {
+    "1": [
+      {"segment_key": "part1-q...", "question_number": 1, "question_text": "...", "transcript": "Full answer transcript..."},
+      {"segment_key": "part1-q...", "question_number": 2, "question_text": "...", "transcript": "..."}
+    ]
+  },
+  "modelAnswers": [
+    {
+      "segment_key": "part1-q...",
+      "partNumber": 1,
+      "questionNumber": 1,
+      "question": "Question text",
+      "candidateResponse": "Full transcript of candidate's answer",
+      "estimatedBand": 5.5,
+      "targetBand": 6,
+      "modelAnswer": "A comprehensive Band 6 model answer (80-120 words)...",
+      "whyItWorks": ["Uses topic-specific vocabulary", "Clear organization"],
+      "keyImprovements": ["Add more examples", "Vary vocabulary"]
+    }
   ]
-    .filter(Boolean)
-    .join('\n');
+}
+
+INPUT DATA:
+questions_json: ${questionJson}
+segment_map_json (${numQ} segments to evaluate): ${segmentJson}
+
+CRITICAL: You MUST return exactly ${numQ} entries in modelAnswers array. Listen carefully to each audio file.`;
 }
 
 function parseJson(text: string): any {
@@ -325,6 +217,106 @@ function parseJson(text: string): any {
   const objMatch = text.match(/\{[\s\S]*\}/);
   if (objMatch) try { return JSON.parse(objMatch[0]); } catch {}
   return null;
+}
+
+// Validate that response has required fields and completeness
+function validateEvaluationResult(result: any, expectedQuestionCount: number): { valid: boolean; issues: string[] } {
+  const issues: string[] = [];
+  
+  if (!result || typeof result !== 'object') {
+    return { valid: false, issues: ['Response is not a valid object'] };
+  }
+
+  // Check overall_band exists and is reasonable
+  const overallBand = result.overall_band ?? result.overallBand;
+  if (typeof overallBand !== 'number' || overallBand < 1 || overallBand > 9) {
+    issues.push(`Invalid overall_band: ${overallBand}`);
+  }
+
+  // Check criteria scores - handle both formats
+  const criteria = result.criteria || {};
+  const criteriaKeys = ['fluency_coherence', 'lexical_resource', 'grammatical_range', 'pronunciation'];
+  
+  for (const key of criteriaKeys) {
+    // Check in criteria wrapper first, then at root level
+    const criterion = criteria[key] || result[key];
+    const band = criterion?.band ?? criterion?.score;
+    
+    if (typeof band !== 'number' || band < 0 || band > 9) {
+      issues.push(`Missing or invalid band for ${key}: ${band}`);
+    }
+    
+    // Ensure we have feedback, not just "no audio input"
+    const feedback = criterion?.feedback || '';
+    if (typeof feedback === 'string' && feedback.toLowerCase().includes('no audio input')) {
+      issues.push(`${key} says "no audio input" - audio wasn't processed correctly`);
+    }
+  }
+
+  // Check modelAnswers count
+  const modelAnswers = result.modelAnswers || result.model_answers || [];
+  if (!Array.isArray(modelAnswers) || modelAnswers.length < expectedQuestionCount) {
+    issues.push(`Expected ${expectedQuestionCount} modelAnswers, got ${modelAnswers.length}`);
+  }
+
+  // Check transcripts exist
+  const transcriptsByQuestion = result.transcripts_by_question;
+  if (!transcriptsByQuestion || typeof transcriptsByQuestion !== 'object') {
+    issues.push('Missing transcripts_by_question');
+  } else {
+    // Count total transcript entries
+    let transcriptCount = 0;
+    for (const partEntries of Object.values(transcriptsByQuestion)) {
+      if (Array.isArray(partEntries)) {
+        transcriptCount += partEntries.length;
+      }
+    }
+    if (transcriptCount < expectedQuestionCount) {
+      issues.push(`Expected ${expectedQuestionCount} transcripts, got ${transcriptCount}`);
+    }
+  }
+
+  // Check that criteria bands are not all zero (indicates failed processing)
+  let allZero = true;
+  for (const key of criteriaKeys) {
+    const criterion = criteria[key] || result[key];
+    const band = criterion?.band ?? criterion?.score ?? 0;
+    if (band > 0) allZero = false;
+  }
+  if (allZero && (result.overall_band ?? result.overallBand) > 0) {
+    issues.push('All criteria bands are 0 but overall_band is non-zero - inconsistent');
+  }
+
+  return { valid: issues.length === 0, issues };
+}
+
+// Normalize Gemini response to consistent format
+function normalizeGeminiResponse(result: any): any {
+  if (!result) return result;
+
+  // If criteria is missing but individual criteria are at root level, restructure
+  if (!result.criteria && (result.fluency_coherence || result.lexical_resource)) {
+    const criteriaKeys = ['fluency_coherence', 'lexical_resource', 'grammatical_range', 'pronunciation'];
+    result.criteria = {};
+    
+    for (const key of criteriaKeys) {
+      if (result[key]) {
+        // Normalize score -> band
+        const criterion = { ...result[key] };
+        if (criterion.score !== undefined && criterion.band === undefined) {
+          criterion.band = criterion.score;
+        }
+        result.criteria[key] = criterion;
+      }
+    }
+  }
+
+  // Ensure overall_band is set
+  if (result.overallBand !== undefined && result.overall_band === undefined) {
+    result.overall_band = result.overallBand;
+  }
+
+  return result;
 }
 
 function calculateBand(result: any): number {
@@ -613,11 +605,37 @@ serve(async (req) => {
               if (responseText) {
                 const parsed = parseJson(responseText);
                 if (parsed) {
-                  evaluationResult = parsed;
-                  usedModel = modelName;
-                  usedKey = candidateKey;
-                  console.log(`[evaluate-speaking-submission] Success with ${modelName}`);
-                  break;
+                  // Normalize the response structure
+                  const normalized = normalizeGeminiResponse(parsed);
+                  
+                  // Validate completeness
+                  const validation = validateEvaluationResult(normalized, audioFiles.length);
+                  
+                  if (validation.valid) {
+                    evaluationResult = normalized;
+                    usedModel = modelName;
+                    usedKey = candidateKey;
+                    console.log(`[evaluate-speaking-submission] Success with ${modelName}`);
+                    break;
+                  } else {
+                    // Log validation issues but still accept if we have basic data
+                    console.warn(`[evaluate-speaking-submission] Validation issues: ${validation.issues.join(', ')}`);
+                    
+                    // Accept if we at least have overall_band and some criteria
+                    const overallBand = normalized.overall_band ?? normalized.overallBand;
+                    const hasSomeCriteria = normalized.criteria && Object.keys(normalized.criteria).length > 0;
+                    
+                    if (typeof overallBand === 'number' && overallBand > 0 && hasSomeCriteria) {
+                      console.log(`[evaluate-speaking-submission] Accepting partial result with issues`);
+                      evaluationResult = normalized;
+                      usedModel = modelName;
+                      usedKey = candidateKey;
+                      break;
+                    }
+                    
+                    // Otherwise log and try next
+                    console.warn(`[evaluate-speaking-submission] Response too incomplete, trying next model...`);
+                  }
                 }
               }
 
