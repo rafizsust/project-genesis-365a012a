@@ -1,10 +1,1 @@
-project_id = "jtfbocwsfxwrzfzvzgja"
-
-[functions.retry-speaking-evaluation]
-verify_jwt = false
-
-# Cron job to retry stuck/failed speaking evaluations every 2 minutes
-[[cron_jobs]]
-name = "retry-speaking-evaluations"
-schedule = "*/2 * * * *"
-function = "retry-speaking-evaluation"
+project_id = "numsihpyierdzznzkcsa"
