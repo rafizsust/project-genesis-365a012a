@@ -1,7 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { GoogleGenerativeAI } from "https://esm.sh/@google/generative-ai@0.21.0";
-import { GoogleAIFileManager } from "https://esm.sh/@google/generative-ai@0.21.0/server";
+// NOTE: GoogleAIFileManager removed - uses Node.js fs which doesn't work in Deno
 import { 
   getActiveGeminiKeysForModel, 
   markKeyQuotaExhausted,
@@ -88,39 +88,75 @@ async function decryptKey(encrypted: string, appKey: string): Promise<string> {
   return decoder.decode(decrypted);
 }
 
-// Upload audio to Google File API and return file URI
+// Upload audio to Google File API using direct HTTP (Deno-compatible, no fs.readFileSync)
 async function uploadToGoogleFileAPI(
-  fileManager: GoogleAIFileManager,
+  apiKey: string,
   audioBytes: Uint8Array,
   fileName: string,
   mimeType: string
 ): Promise<{ uri: string; mimeType: string }> {
-  // Write to temp file (required by File API)
-  const tempPath = `/tmp/${fileName}`;
-  await Deno.writeFile(tempPath, audioBytes);
+  console.log(`[evaluate-speaking-submission] Uploading ${fileName} to Google File API (${audioBytes.length} bytes)...`);
   
-  try {
-    console.log(`[evaluate-speaking-submission] Uploading ${fileName} to Google File API...`);
-    
-    const uploadResult = await fileManager.uploadFile(tempPath, {
-      mimeType,
+  // Google File API uses resumable upload protocol
+  // Step 1: Initiate the upload
+  const initiateUrl = `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${apiKey}`;
+  
+  const metadata = {
+    file: {
       displayName: fileName,
-    });
-    
-    console.log(`[evaluate-speaking-submission] Uploaded ${fileName}: ${uploadResult.file.uri}`);
-    
-    return {
-      uri: uploadResult.file.uri,
-      mimeType: uploadResult.file.mimeType,
-    };
-  } finally {
-    // Clean up temp file
-    try {
-      await Deno.remove(tempPath);
-    } catch {
-      // Ignore cleanup errors
     }
+  };
+  
+  const initiateResponse = await fetch(initiateUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Goog-Upload-Protocol': 'resumable',
+      'X-Goog-Upload-Command': 'start',
+      'X-Goog-Upload-Header-Content-Length': String(audioBytes.length),
+      'X-Goog-Upload-Header-Content-Type': mimeType,
+    },
+    body: JSON.stringify(metadata),
+  });
+  
+  if (!initiateResponse.ok) {
+    const errorText = await initiateResponse.text();
+    throw new Error(`Failed to initiate upload: ${initiateResponse.status} - ${errorText}`);
   }
+  
+  const uploadUrl = initiateResponse.headers.get('X-Goog-Upload-URL');
+  if (!uploadUrl) {
+    throw new Error('No upload URL returned from Google File API');
+  }
+  
+  // Step 2: Upload the actual bytes
+  const uploadResponse = await fetch(uploadUrl, {
+    method: 'PUT',
+    headers: {
+      'Content-Length': String(audioBytes.length),
+      'X-Goog-Upload-Offset': '0',
+      'X-Goog-Upload-Command': 'upload, finalize',
+    },
+    body: audioBytes.buffer as ArrayBuffer,
+  });
+  
+  if (!uploadResponse.ok) {
+    const errorText = await uploadResponse.text();
+    throw new Error(`Failed to upload file: ${uploadResponse.status} - ${errorText}`);
+  }
+  
+  const result = await uploadResponse.json();
+  
+  if (!result.file?.uri) {
+    throw new Error('No file URI returned from Google File API');
+  }
+  
+  console.log(`[evaluate-speaking-submission] Uploaded ${fileName}: ${result.file.uri}`);
+  
+  return {
+    uri: result.file.uri,
+    mimeType: result.file.mimeType || mimeType,
+  };
 }
 
 // Build evaluation prompt with expert examiner analysis
@@ -581,8 +617,7 @@ serve(async (req) => {
       console.log(`[evaluate-speaking-submission] Trying key ${candidateKey.isUserProvided ? '(user)' : `(admin: ${candidateKey.keyId})`}`);
 
       try {
-        // Initialize File Manager and GenAI with this key
-        const fileManager = new GoogleAIFileManager(candidateKey.key);
+        // Initialize GenAI with this key
         const genAI = new GoogleGenerativeAI(candidateKey.key);
 
         // ============ UPLOAD FILES TO GOOGLE FILE API ============
@@ -593,7 +628,7 @@ serve(async (req) => {
         for (const audioFile of audioFiles) {
           try {
             const uploadResult = await uploadToGoogleFileAPI(
-              fileManager,
+              candidateKey.key,
               audioFile.bytes,
               `${audioFile.key}.webm`,
               audioFile.mimeType
