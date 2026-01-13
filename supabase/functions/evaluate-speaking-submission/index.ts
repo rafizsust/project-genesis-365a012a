@@ -35,12 +35,45 @@ const GEMINI_MODELS = [
   'gemini-1.5-pro',
 ];
 
-// Custom error class for quota exhaustion
+// Custom error class for quota exhaustion / rate limiting
 class QuotaError extends Error {
-  constructor(message: string) {
+  permanent: boolean;
+  retryAfterSeconds?: number;
+
+  constructor(message: string, opts: { permanent: boolean; retryAfterSeconds?: number }) {
     super(message);
     this.name = 'QuotaError';
+    this.permanent = opts.permanent;
+    this.retryAfterSeconds = opts.retryAfterSeconds;
   }
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function extractRetryAfterSeconds(err: any): number | undefined {
+  const msg = String(err?.message || err || '');
+
+  // Gemini sometimes includes: retryDelay":"56s" OR "Please retry in 56.7s"
+  const m1 = msg.match(/retryDelay"\s*:\s*"(\d+)s"/i);
+  if (m1) return Math.max(0, Number(m1[1]));
+
+  const m2 = msg.match(/retry\s+in\s+([0-9.]+)s/i);
+  if (m2) return Math.max(0, Math.ceil(Number(m2[1])));
+
+  return undefined;
+}
+
+function isPermanentQuotaExhausted(err: any): boolean {
+  const msg = String(err?.message || err || '').toLowerCase();
+
+  // Signals that waiting won't help (billing/quota disabled or hard daily cap)
+  if (msg.includes('check your plan') || msg.includes('billing')) return true;
+  if (msg.includes('limit: 0')) return true;
+  if (msg.includes('per day') && !msg.includes('retry')) return true;
+
+  return false;
 }
 
 // Convert Uint8Array to base64 string
@@ -389,6 +422,10 @@ serve(async (req) => {
     let usedModel: string | null = null;
     let usedKey: KeyCandidate | null = null;
 
+    // If we ONLY hit temporary rate limits, return a 429 with Retry-After (do not mark keys exhausted)
+    let bestRetryAfterSeconds: number | null = null;
+    let sawTemporaryRateLimit = false;
+
     for (const candidateKey of keyQueue) {
       if (evaluationResult) break;
       
@@ -397,87 +434,151 @@ serve(async (req) => {
       try {
         // Generate content using inline base64 data (Deno-compatible)
         const genAI = new GoogleGenerativeAI(candidateKey.key);
-        
+
         // Try each model in priority order
         for (const modelName of GEMINI_MODELS) {
           if (evaluationResult) break;
-          
-          try {
-            console.log(`[evaluate-speaking-submission] Attempting evaluation with model: ${modelName}`);
-            const model = genAI.getGenerativeModel({ model: modelName });
-            
-            // Build content with inline base64 audio data
-            const contentParts: any[] = [];
-            
-            // Add audio files as inline data
-            for (const audioFile of audioFiles) {
-              contentParts.push({ 
-                inlineData: { 
-                  mimeType: audioFile.mimeType, 
-                  data: audioFile.base64Data 
-                } 
-              });
-            }
-            
-            // Add prompt
-            contentParts.push({ text: prompt });
 
-            const result = await model.generateContent({
-              contents: [{ role: 'user', parts: contentParts }],
-              generationConfig: {
-                temperature: 0.3,
-                maxOutputTokens: 8000,
+          console.log(`[evaluate-speaking-submission] Attempting evaluation with model: ${modelName}`);
+          const model = genAI.getGenerativeModel({ model: modelName });
+
+          // Build content with inline base64 audio data (built once per model)
+          const contentParts: any[] = [];
+          for (const audioFile of audioFiles) {
+            contentParts.push({
+              inlineData: {
+                mimeType: audioFile.mimeType,
+                data: audioFile.base64Data,
               },
             });
+          }
+          contentParts.push({ text: prompt });
 
-            const responseText = result.response?.text();
-            if (responseText) {
-              const parsed = parseJson(responseText);
-              if (parsed) {
-                evaluationResult = parsed;
-                usedModel = modelName;
-                usedKey = candidateKey;
-                console.log(`[evaluate-speaking-submission] Success with ${modelName}`);
+          // Retry ONCE on temporary rate limit (RetryInfo) instead of burning through all keys
+          for (let attempt = 0; attempt < 2; attempt++) {
+            try {
+              const result = await model.generateContent({
+                contents: [{ role: 'user', parts: contentParts }],
+                generationConfig: {
+                  temperature: 0.3,
+                  maxOutputTokens: 8000,
+                },
+              });
+
+              const responseText = result.response?.text();
+              if (responseText) {
+                const parsed = parseJson(responseText);
+                if (parsed) {
+                  evaluationResult = parsed;
+                  usedModel = modelName;
+                  usedKey = candidateKey;
+                  console.log(`[evaluate-speaking-submission] Success with ${modelName}`);
+                  break;
+                }
+              }
+
+              // If we didn't get parseable JSON, try next model (no key switching here)
+              break;
+            } catch (modelError: any) {
+              const msg = String(modelError?.message || modelError);
+              console.warn(`[evaluate-speaking-submission] Model ${modelName} failed (attempt ${attempt + 1}/2):`, msg);
+
+              const isQuotaLike =
+                isQuotaExhaustedError(modelError) || modelError?.status === 429 || modelError?.status === 403;
+
+              if (!isQuotaLike) {
+                // Non-quota error -> try next model/key
                 break;
               }
+
+              const retryAfter = extractRetryAfterSeconds(modelError);
+              const permanent = isPermanentQuotaExhausted(modelError) || retryAfter === undefined;
+
+              if (!permanent && retryAfter && retryAfter > 0 && attempt === 0) {
+                sawTemporaryRateLimit = true;
+                bestRetryAfterSeconds =
+                  bestRetryAfterSeconds === null ? retryAfter : Math.min(bestRetryAfterSeconds, retryAfter);
+                console.warn(
+                  `[evaluate-speaking-submission] Temporary rate limit. Waiting ${retryAfter}s then retrying same key/model...`,
+                );
+                await sleep((retryAfter + 1) * 1000);
+                continue;
+              }
+
+              throw new QuotaError(`Gemini quota/rate limit: ${msg}`, {
+                permanent,
+                retryAfterSeconds: retryAfter,
+              });
             }
-          } catch (modelError: any) {
-            console.warn(`[evaluate-speaking-submission] Model ${modelName} failed:`, modelError.message);
-            
-            if (isQuotaExhaustedError(modelError) || modelError?.status === 429 || modelError?.status === 403) {
-              throw new QuotaError(`Generation quota exhausted: ${modelError.message}`);
-            }
-            
-            // Continue to next model
-            continue;
           }
         }
 
       } catch (error: any) {
         if (error instanceof QuotaError) {
-          console.warn(`[evaluate-speaking-submission] Key ${candidateKey.keyId || 'user'} quota exhausted. Switching to next key...`);
-          
-          if (!candidateKey.isUserProvided && candidateKey.keyId) {
-            await markKeyQuotaExhausted(supabaseService, candidateKey.keyId, 'flash');
+          const keyLabel = usedKey?.isUserProvided
+            ? '(user)'
+            : candidateKey.isUserProvided
+              ? '(user)'
+              : `(admin: ${candidateKey.keyId})`;
+
+          if (error.permanent) {
+            console.warn(`[evaluate-speaking-submission] Permanent quota/billing issue for ${keyLabel}. Switching key...`);
+            if (!candidateKey.isUserProvided && candidateKey.keyId) {
+              await markKeyQuotaExhausted(supabaseService, candidateKey.keyId, 'flash');
+            }
+            continue;
           }
-          
-          continue; // Try next key
+
+          // Temporary rate-limit: do NOT mark exhausted. We'll either have already waited and retried,
+          // or we rotate without persisting exhaustion.
+          sawTemporaryRateLimit = true;
+          if (typeof error.retryAfterSeconds === 'number' && error.retryAfterSeconds > 0) {
+            bestRetryAfterSeconds =
+              bestRetryAfterSeconds === null
+                ? error.retryAfterSeconds
+                : Math.min(bestRetryAfterSeconds, error.retryAfterSeconds);
+          }
+
+          console.warn(`[evaluate-speaking-submission] Temporary rate limit for ${keyLabel}. Trying next key...`);
+          continue;
         }
-        
+
         // Log and continue to next key
-        console.error('[evaluate-speaking-submission] Error during evaluation:', error.message);
+        console.error('[evaluate-speaking-submission] Error during evaluation:', error?.message || error);
         continue;
       }
     }
 
     if (!evaluationResult || !usedModel || !usedKey) {
-      return new Response(JSON.stringify({ 
-        error: 'All API keys exhausted. Please try again later or add your own Gemini API key.', 
-        code: 'ALL_KEYS_EXHAUSTED' 
-      }), {
-        status: 503,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
+      if (sawTemporaryRateLimit) {
+        const retryAfter = bestRetryAfterSeconds ?? 60;
+        return new Response(
+          JSON.stringify({
+            error: `Gemini is rate-limiting requests right now. Please retry in ~${retryAfter}s.`,
+            code: 'RATE_LIMITED',
+            retryAfterSeconds: retryAfter,
+          }),
+          {
+            status: 429,
+            headers: {
+              ...corsHeaders,
+              'Content-Type': 'application/json',
+              'Retry-After': String(retryAfter),
+            },
+          },
+        );
+      }
+
+      return new Response(
+        JSON.stringify({
+          error: 'All API keys are exhausted or misconfigured. Please add a working Gemini API key in Settings (paid/billed project) and try again.',
+          code: 'ALL_KEYS_EXHAUSTED',
+        }),
+        {
+          status: 503,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        },
+      );
     }
 
     console.log(`[evaluate-speaking-submission] Successfully received response from model: ${usedModel}`);
