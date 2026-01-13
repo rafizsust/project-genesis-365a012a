@@ -56,8 +56,8 @@ interface ApiKeyRecord {
 
 // Fetch active Gemini keys from api_keys table with rotation support AND quota filtering
 async function getActiveGeminiKeys(supabaseServiceClient: any): Promise<ApiKeyRecord[]> {
-  // Use the shared utility that filters out quota-exhausted keys for 'flash' model type
-  return await getActiveGeminiKeysForModel(supabaseServiceClient, 'flash');
+  // Use the shared utility that filters out quota-exhausted keys for 'flash_2_5' model type
+  return await getActiveGeminiKeysForModel(supabaseServiceClient, 'flash_2_5');
 }
 
 // Increment error count for a failed key
@@ -90,10 +90,10 @@ async function incrementKeyErrorCount(supabaseServiceClient: any, keyId: string,
   }
 }
 
-// Mark key as quota exhausted for flash model
+// Mark key as quota exhausted for flash_2_5 model
 async function markKeyQuotaExhaustedForFlash(supabaseServiceClient: any, keyId: string): Promise<void> {
-  await markKeyQuotaExhausted(supabaseServiceClient, keyId, 'flash');
-  console.log(`[evaluate-ai-speaking] Marked key ${keyId} as flash quota exhausted`);
+  await markKeyQuotaExhausted(supabaseServiceClient, keyId, 'flash_2_5');
+  console.log(`[evaluate-ai-speaking] Marked key ${keyId} as flash_2_5 quota exhausted`);
 }
 
 // Reset error count on successful use

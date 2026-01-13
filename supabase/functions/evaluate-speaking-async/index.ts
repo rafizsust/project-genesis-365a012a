@@ -380,7 +380,7 @@ async function runEvaluation(
   }
 
   // Add admin pool keys
-  const poolKeys = await getActiveGeminiKeysForModel(supabaseService, 'flash');
+  const poolKeys = await getActiveGeminiKeysForModel(supabaseService, 'flash_2_5');
   for (const pk of poolKeys) {
     keyQueue.push({ key: pk.key_value, id: pk.id, isUser: false });
   }
@@ -457,7 +457,7 @@ async function runEvaluation(
               if (candidate.isUser) {
                 userKeyWasQuotaLimited = true;
               } else if (candidate.id) {
-                await markKeyQuotaExhausted(supabaseService, candidate.id, 'flash');
+                await markKeyQuotaExhausted(supabaseService, candidate.id, 'flash_2_5');
               }
               // Do NOT retry this key/model.
               break;
@@ -466,7 +466,7 @@ async function runEvaluation(
             // Invalid key: stop using this key.
             if (kind === 'invalid_key') {
               if (!candidate.isUser && candidate.id) {
-                await markKeyQuotaExhausted(supabaseService, candidate.id, 'flash');
+                await markKeyQuotaExhausted(supabaseService, candidate.id, 'flash_2_5');
               }
               break;
             }

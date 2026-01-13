@@ -191,7 +191,7 @@ function buildPrompt(
 
   const numQ = orderedSegments.length;
 
-  return `You are a SENIOR IELTS Speaking examiner. Return ONLY valid JSON, no markdown.
+  return `You are a SENIOR IELTS Speaking examiner with 15+ years experience. Return ONLY valid JSON, no markdown.
 
 CONTEXT: Topic: ${topic || 'General'}, Difficulty: ${difficulty || 'Medium'}, Parts: ${partsDescription}, Questions: ${numQ}
 ${fluencyFlag ? '⚠️ Part 2 under 80s - penalize Fluency & Coherence.' : ''}
@@ -203,9 +203,31 @@ MANDATORY REQUIREMENTS:
 4. Include transcripts_by_question with ALL ${numQ} question transcripts
 5. All band scores must be between 1.0 and 9.0 (not zero!)
 
+EXPERT EXAMINER OBSERVATIONS (CRITICAL):
+1. **Repetition Detection**: Identify if the candidate excessively repeats the same words, phrases, or sentence structures across multiple answers. Minor repetition is acceptable, but flag if:
+   - Same filler phrases appear in >50% of responses
+   - Identical sentence structures used repeatedly
+   - Limited vocabulary range with same words recycled excessively
+   Include specific examples in feedback if detected.
+
+2. **Relevance & Topic Adherence**: Assess whether the candidate:
+   - Actually answers the question asked (not something tangential)
+   - Stays within the question's context
+   - Demonstrates understanding of what is being asked
+   - Flag off-topic or random responses that don't address the question
+
+3. **Response Coherence**: Evaluate if responses make logical sense or if the candidate is speaking randomly/incoherently.
+
 SCORING:
 - Short responses (1-10 words) = Band 4.0-4.5 max
+- Off-topic/irrelevant responses = Penalize Fluency & Coherence
+- Excessive repetition = Penalize Lexical Resource
 - Overall band = weighted average (Part2 x2.0, Part3 x1.5, Part1 x1.0)
+
+MODEL ANSWERS - WORD COUNT REQUIREMENTS (CRITICAL):
+- Part 1 answers: ~75 words each (conversational, natural response)
+- Part 2 answers: ~300 words (full long-turn response with all cue card points)
+- Part 3 answers: ~150 words each (extended discussion with reasoning)
 
 MODEL ANSWERS: estimatedBand = candidate's level, targetBand = next whole band up
 Example: estimatedBand 5.5 → targetBand 6 → provide Band 6 model answer
@@ -214,12 +236,14 @@ EXACT JSON SCHEMA (follow precisely):
 {
   "overall_band": 6.0,
   "criteria": {
-    "fluency_coherence": {"band": 6.0, "feedback": "2-3 sentence assessment", "strengths": ["strength1", "strength2"], "weaknesses": ["weakness1"], "suggestions": ["tip1", "tip2"]},
-    "lexical_resource": {"band": 6.0, "feedback": "...", "strengths": [...], "weaknesses": [...], "suggestions": [...]},
+    "fluency_coherence": {"band": 6.0, "feedback": "2-3 sentence assessment including any topic relevance issues", "strengths": ["strength1", "strength2"], "weaknesses": ["weakness1"], "suggestions": ["tip1", "tip2"]},
+    "lexical_resource": {"band": 6.0, "feedback": "Include notes on any excessive word repetition", "strengths": [...], "weaknesses": [...], "suggestions": [...]},
     "grammatical_range": {"band": 5.5, "feedback": "...", "strengths": [...], "weaknesses": [...], "suggestions": [...]},
     "pronunciation": {"band": 6.0, "feedback": "...", "strengths": [...], "weaknesses": [...], "suggestions": [...]}
   },
-  "summary": "2-4 sentence overall performance summary",
+  "summary": "2-4 sentence overall performance summary noting any repetition/relevance concerns",
+  "repetition_analysis": {"detected": true/false, "severity": "none|mild|moderate|excessive", "examples": ["phrase repeated X times"], "impact_on_score": "explanation"},
+  "relevance_analysis": {"overall_on_topic": true/false, "off_topic_questions": [1, 5], "notes": "explanation of any relevance issues"},
   "lexical_upgrades": [{"original": "good", "upgraded": "beneficial", "context": "example sentence"}],
   "part_analysis": [{"part_number": 1, "performance_notes": "analysis...", "key_moments": ["..."], "areas_for_improvement": ["..."]}],
   "improvement_priorities": ["Priority 1: ...", "Priority 2: ..."],
@@ -240,7 +264,7 @@ EXACT JSON SCHEMA (follow precisely):
       "candidateResponse": "Full transcript of candidate's answer",
       "estimatedBand": 5.5,
       "targetBand": 6,
-      "modelAnswer": "A comprehensive Band 6 model answer (80-120 words)...",
+      "modelAnswer": "A comprehensive Band 6 model answer (~75 words for Part1, ~300 words for Part2, ~150 words for Part3)...",
       "whyItWorks": ["Uses topic-specific vocabulary", "Clear organization"],
       "keyImprovements": ["Add more examples", "Vary vocabulary"]
     }
@@ -251,7 +275,7 @@ INPUT DATA:
 questions_json: ${questionJson}
 segment_map_json (${numQ} segments to evaluate): ${segmentJson}
 
-CRITICAL: You MUST return exactly ${numQ} entries in modelAnswers array. Listen carefully to each audio file.`;
+CRITICAL: You MUST return exactly ${numQ} entries in modelAnswers array. Follow the word count guidelines for each part. Listen carefully to each audio file.`;
 }
 
 function parseJson(text: string): any {
@@ -553,7 +577,7 @@ serve(async (req) => {
     }
 
     // 2. Add admin keys from database
-    const dbApiKeys = await getActiveGeminiKeysForModel(supabaseService, 'flash');
+    const dbApiKeys = await getActiveGeminiKeysForModel(supabaseService, 'flash_2_5');
     for (const dbKey of dbApiKeys) {
       keyQueue.push({ key: dbKey.key_value, keyId: dbKey.id, isUserProvided: false });
     }
@@ -779,7 +803,7 @@ serve(async (req) => {
           if (error.permanent) {
             console.warn(`[evaluate-speaking-submission] Permanent quota/billing issue for ${keyLabel}. Switching key...`);
             if (!candidateKey.isUserProvided && candidateKey.keyId) {
-              await markKeyQuotaExhausted(supabaseService, candidateKey.keyId, 'flash');
+              await markKeyQuotaExhausted(supabaseService, candidateKey.keyId, 'flash_2_5');
             }
             continue;
           }

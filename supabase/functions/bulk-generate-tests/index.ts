@@ -91,7 +91,7 @@ function pickSecondaryVoice(primaryVoice: string, accent: string): string {
 }
 
 // API Key management for round-robin Gemini API calls with quota tracking
-type QuotaModelType = 'tts' | 'flash';
+type QuotaModelType = 'tts' | 'flash_2_5';
 
 interface ApiKeyRecord {
   id: string;
@@ -158,7 +158,7 @@ async function getActiveGeminiKeysForModel(supabaseServiceClient: any, modelType
 
 // Legacy function for backward compatibility - uses flash model type by default
 async function getActiveGeminiKeys(supabaseServiceClient: any): Promise<ApiKeyRecord[]> {
-  return getActiveGeminiKeysForModel(supabaseServiceClient, 'flash');
+  return getActiveGeminiKeysForModel(supabaseServiceClient, 'flash_2_5');
 }
 
 async function markKeyQuotaExhausted(supabaseServiceClient: any, keyId: string, modelType: QuotaModelType): Promise<void> {
@@ -260,7 +260,7 @@ let currentKeyIndex = 0;
 
 function getNextApiKey(): ApiKeyRecord | null {
   if (flashKeyCache.length > 0) {
-    return getNextApiKeyForModel('flash');
+    return getNextApiKeyForModel('flash_2_5');
   }
   // Fallback to legacy cache
   if (apiKeyCache.length === 0) return null;

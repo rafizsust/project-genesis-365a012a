@@ -56,8 +56,8 @@ interface UserApiKey {
   updated_at: string;
   tts_quota_exhausted: boolean | null;
   tts_quota_exhausted_date: string | null;
-  flash_quota_exhausted: boolean | null;
-  flash_quota_exhausted_date: string | null;
+  flash_2_5_quota_exhausted: boolean | null;
+  flash_2_5_quota_exhausted_date: string | null;
 }
 
 interface UserApiKeyManagerProps {
@@ -179,7 +179,7 @@ export function UserApiKeyManager({ onApiKeyChanged }: UserApiKeyManagerProps) {
     }
   };
 
-  const resetQuota = async (id: string, quotaType: 'tts' | 'flash' | 'all') => {
+  const resetQuota = async (id: string, quotaType: 'tts' | 'flash_2_5' | 'all') => {
     try {
       const updateData: Record<string, any> = { updated_at: new Date().toISOString() };
       
@@ -187,9 +187,9 @@ export function UserApiKeyManager({ onApiKeyChanged }: UserApiKeyManagerProps) {
         updateData.tts_quota_exhausted = false;
         updateData.tts_quota_exhausted_date = null;
       }
-      if (quotaType === 'flash' || quotaType === 'all') {
-        updateData.flash_quota_exhausted = false;
-        updateData.flash_quota_exhausted_date = null;
+      if (quotaType === 'flash_2_5' || quotaType === 'all') {
+        updateData.flash_2_5_quota_exhausted = false;
+        updateData.flash_2_5_quota_exhausted_date = null;
       }
 
       const { error } = await supabase
@@ -205,7 +205,7 @@ export function UserApiKeyManager({ onApiKeyChanged }: UserApiKeyManagerProps) {
             ? {
                 ...key,
                 ...(quotaType === 'tts' || quotaType === 'all' ? { tts_quota_exhausted: false, tts_quota_exhausted_date: null } : {}),
-                ...(quotaType === 'flash' || quotaType === 'all' ? { flash_quota_exhausted: false, flash_quota_exhausted_date: null } : {}),
+                ...(quotaType === 'flash_2_5' || quotaType === 'all' ? { flash_2_5_quota_exhausted: false, flash_2_5_quota_exhausted_date: null } : {}),
               }
             : key
         )
@@ -213,7 +213,7 @@ export function UserApiKeyManager({ onApiKeyChanged }: UserApiKeyManagerProps) {
 
       toast({
         title: 'Success',
-        description: `${quotaType === 'all' ? 'All quotas' : quotaType.toUpperCase() + ' quota'} reset successfully`,
+        description: `${quotaType === 'all' ? 'All quotas' : (quotaType === 'flash_2_5' ? 'Flash 2.5' : 'TTS') + ' quota'} reset successfully`,
       });
     } catch (error) {
       console.error('Error resetting quota:', error);
@@ -234,8 +234,8 @@ export function UserApiKeyManager({ onApiKeyChanged }: UserApiKeyManagerProps) {
         .update({
           tts_quota_exhausted: false,
           tts_quota_exhausted_date: null,
-          flash_quota_exhausted: false,
-          flash_quota_exhausted_date: null,
+          flash_2_5_quota_exhausted: false,
+          flash_2_5_quota_exhausted_date: null,
           updated_at: new Date().toISOString(),
         })
         .eq('user_id', user.id)
@@ -248,8 +248,8 @@ export function UserApiKeyManager({ onApiKeyChanged }: UserApiKeyManagerProps) {
           ...key,
           tts_quota_exhausted: false,
           tts_quota_exhausted_date: null,
-          flash_quota_exhausted: false,
-          flash_quota_exhausted_date: null,
+          flash_2_5_quota_exhausted: false,
+          flash_2_5_quota_exhausted_date: null,
         }))
       );
 
@@ -314,7 +314,7 @@ export function UserApiKeyManager({ onApiKeyChanged }: UserApiKeyManagerProps) {
 
   const activeCount = apiKeys.filter(k => k.is_active).length;
   const ttsExhaustedCount = apiKeys.filter(k => k.tts_quota_exhausted && isQuotaExhaustedToday(k.tts_quota_exhausted_date)).length;
-  const flashExhaustedCount = apiKeys.filter(k => k.flash_quota_exhausted && isQuotaExhaustedToday(k.flash_quota_exhausted_date)).length;
+  const flash25ExhaustedCount = apiKeys.filter(k => k.flash_2_5_quota_exhausted && isQuotaExhaustedToday(k.flash_2_5_quota_exhausted_date)).length;
 
   return (
     <Card>
@@ -337,12 +337,12 @@ export function UserApiKeyManager({ onApiKeyChanged }: UserApiKeyManagerProps) {
               {ttsExhaustedCount} TTS Quota Hit
             </Badge>
           )}
-          {flashExhaustedCount > 0 && (
+          {flash25ExhaustedCount > 0 && (
             <Badge variant="outline" className="text-amber-600 border-amber-600">
-              {flashExhaustedCount} Flash Quota Hit
+              {flash25ExhaustedCount} Flash 2.5 Quota Hit
             </Badge>
           )}
-          {(ttsExhaustedCount > 0 || flashExhaustedCount > 0) && (
+          {(ttsExhaustedCount > 0 || flash25ExhaustedCount > 0) && (
             <Button variant="outline" size="sm" onClick={resetAllQuotas}>
               <RefreshCw className="w-3 h-3 mr-1" />
               Reset All Quotas
@@ -416,7 +416,7 @@ export function UserApiKeyManager({ onApiKeyChanged }: UserApiKeyManagerProps) {
                 <TableHead>Key</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>TTS Quota</TableHead>
-                <TableHead>Flash Quota</TableHead>
+                <TableHead>Flash 2.5 Quota</TableHead>
                 <TableHead>Added</TableHead>
                 <TableHead className="text-right">Actions</TableHead>
               </TableRow>
@@ -468,7 +468,7 @@ export function UserApiKeyManager({ onApiKeyChanged }: UserApiKeyManagerProps) {
                     )}
                   </TableCell>
                   <TableCell>
-                    {key.flash_quota_exhausted && isQuotaExhaustedToday(key.flash_quota_exhausted_date) ? (
+                    {key.flash_2_5_quota_exhausted && isQuotaExhaustedToday(key.flash_2_5_quota_exhausted_date) ? (
                       <div className="flex items-center gap-2">
                         <Badge variant="outline" className="text-amber-600 border-amber-600">
                           Exhausted
@@ -476,8 +476,8 @@ export function UserApiKeyManager({ onApiKeyChanged }: UserApiKeyManagerProps) {
                         <Button
                           variant="ghost"
                           size="sm"
-                          onClick={() => resetQuota(key.id, 'flash')}
-                          title="Reset Flash quota"
+                          onClick={() => resetQuota(key.id, 'flash_2_5')}
+                          title="Reset Flash 2.5 quota"
                         >
                           <RefreshCw className="w-3 h-3" />
                         </Button>

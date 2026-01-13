@@ -181,8 +181,8 @@ export type Database = {
         Row: {
           created_at: string
           error_count: number
-          flash_quota_exhausted: boolean | null
-          flash_quota_exhausted_date: string | null
+          flash_2_5_quota_exhausted: boolean | null
+          flash_2_5_quota_exhausted_date: string | null
           id: string
           is_active: boolean
           key_value: string
@@ -194,8 +194,8 @@ export type Database = {
         Insert: {
           created_at?: string
           error_count?: number
-          flash_quota_exhausted?: boolean | null
-          flash_quota_exhausted_date?: string | null
+          flash_2_5_quota_exhausted?: boolean | null
+          flash_2_5_quota_exhausted_date?: string | null
           id?: string
           is_active?: boolean
           key_value: string
@@ -207,8 +207,8 @@ export type Database = {
         Update: {
           created_at?: string
           error_count?: number
-          flash_quota_exhausted?: boolean | null
-          flash_quota_exhausted_date?: string | null
+          flash_2_5_quota_exhausted?: boolean | null
+          flash_2_5_quota_exhausted_date?: string | null
           id?: string
           is_active?: boolean
           key_value?: string
@@ -1410,8 +1410,8 @@ export type Database = {
       user_api_keys: {
         Row: {
           created_at: string
-          flash_quota_exhausted: boolean | null
-          flash_quota_exhausted_date: string | null
+          flash_2_5_quota_exhausted: boolean | null
+          flash_2_5_quota_exhausted_date: string | null
           id: string
           is_active: boolean
           key_value: string
@@ -1423,8 +1423,8 @@ export type Database = {
         }
         Insert: {
           created_at?: string
-          flash_quota_exhausted?: boolean | null
-          flash_quota_exhausted_date?: string | null
+          flash_2_5_quota_exhausted?: boolean | null
+          flash_2_5_quota_exhausted_date?: string | null
           id?: string
           is_active?: boolean
           key_value: string
@@ -1436,8 +1436,8 @@ export type Database = {
         }
         Update: {
           created_at?: string
-          flash_quota_exhausted?: boolean | null
-          flash_quota_exhausted_date?: string | null
+          flash_2_5_quota_exhausted?: boolean | null
+          flash_2_5_quota_exhausted_date?: string | null
           id?: string
           is_active?: boolean
           key_value?: string

@@ -1,7 +1,7 @@
 // Shared utility for User API key pool management
 // Similar to admin api_keys but for individual users
 
-export type QuotaModelType = 'tts' | 'flash';
+export type QuotaModelType = 'tts' | 'flash_2_5';
 
 interface UserApiKeyRecord {
   id: string;
@@ -11,8 +11,8 @@ interface UserApiKeyRecord {
   is_active: boolean;
   tts_quota_exhausted?: boolean;
   tts_quota_exhausted_date?: string;
-  flash_quota_exhausted?: boolean;
-  flash_quota_exhausted_date?: string;
+  flash_2_5_quota_exhausted?: boolean;
+  flash_2_5_quota_exhausted_date?: string;
 }
 
 // Get today's date in YYYY-MM-DD format
@@ -28,8 +28,8 @@ export async function getUserActiveKeysForModel(
 ): Promise<UserApiKeyRecord[]> {
   try {
     const today = getTodayDate();
-    const quotaField = modelType === 'tts' ? 'tts_quota_exhausted' : 'flash_quota_exhausted';
-    const quotaDateField = modelType === 'tts' ? 'tts_quota_exhausted_date' : 'flash_quota_exhausted_date';
+    const quotaField = modelType === 'tts' ? 'tts_quota_exhausted' : 'flash_2_5_quota_exhausted';
+    const quotaDateField = modelType === 'tts' ? 'tts_quota_exhausted_date' : 'flash_2_5_quota_exhausted_date';
     
     // First, reset any quotas from previous days
     await supabaseServiceClient.rpc('reset_user_api_key_quotas');
@@ -66,7 +66,7 @@ export async function markUserKeyQuotaExhausted(
     const today = getTodayDate();
     const updateData = modelType === 'tts' 
       ? { tts_quota_exhausted: true, tts_quota_exhausted_date: today, updated_at: new Date().toISOString() }
-      : { flash_quota_exhausted: true, flash_quota_exhausted_date: today, updated_at: new Date().toISOString() };
+      : { flash_2_5_quota_exhausted: true, flash_2_5_quota_exhausted_date: today, updated_at: new Date().toISOString() };
     
     await supabaseServiceClient
       .from('user_api_keys')
@@ -116,15 +116,15 @@ export async function getCombinedActiveKeys(
   // Fallback to admin keys (from api_keys table)
   console.log('No user API keys available, falling back to admin keys');
   const today = getTodayDate();
-  const quotaField = modelType === 'tts' ? 'tts_quota_exhausted' : 'flash_quota_exhausted';
-  const quotaDateField = modelType === 'tts' ? 'tts_quota_exhausted_date' : 'flash_quota_exhausted_date';
+  const quotaField = modelType === 'tts' ? 'tts_quota_exhausted' : 'flash_2_5_quota_exhausted';
+  const quotaDateField = modelType === 'tts' ? 'tts_quota_exhausted_date' : 'flash_2_5_quota_exhausted_date';
   
   try {
     await supabaseServiceClient.rpc('reset_api_key_quotas');
     
     const { data, error } = await supabaseServiceClient
       .from('api_keys')
-      .select('id, provider, key_value, is_active, tts_quota_exhausted, tts_quota_exhausted_date, flash_quota_exhausted, flash_quota_exhausted_date')
+      .select('id, provider, key_value, is_active, tts_quota_exhausted, tts_quota_exhausted_date, flash_2_5_quota_exhausted, flash_2_5_quota_exhausted_date')
       .eq('provider', 'gemini')
       .eq('is_active', true)
       .or(`${quotaField}.is.null,${quotaField}.eq.false,${quotaDateField}.lt.${today}`);
@@ -162,7 +162,7 @@ export async function markKeyExhausted(
   const table = isUserKey ? 'user_api_keys' : 'api_keys';
   const updateData = modelType === 'tts' 
     ? { tts_quota_exhausted: true, tts_quota_exhausted_date: today, updated_at: new Date().toISOString() }
-    : { flash_quota_exhausted: true, flash_quota_exhausted_date: today, updated_at: new Date().toISOString() };
+    : { flash_2_5_quota_exhausted: true, flash_2_5_quota_exhausted_date: today, updated_at: new Date().toISOString() };
   
   try {
     await supabaseServiceClient

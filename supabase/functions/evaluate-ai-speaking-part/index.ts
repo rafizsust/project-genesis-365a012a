@@ -109,8 +109,8 @@ function classifyGeminiError(status: number, errorText: string): GeminiErrorInfo
 
 // Fetch active Gemini keys from api_keys table with rotation support AND quota filtering
 async function getActiveGeminiKeys(supabaseServiceClient: any): Promise<ApiKeyRecord[]> {
-  // Use the shared utility that filters out quota-exhausted keys for 'flash' model type
-  return await getActiveGeminiKeysForModel(supabaseServiceClient, 'flash');
+  // Use the shared utility that filters out quota-exhausted keys for 'flash_2_5' model type
+  return await getActiveGeminiKeysForModel(supabaseServiceClient, 'flash_2_5');
 }
 
 // Increment error count for a failed key
@@ -413,8 +413,8 @@ serve(async (req) => {
                 await incrementKeyErrorCount(supabaseServiceClient, keyId, true);
                 return false; // Try next pool key
               } else if (errorInfo.isQuota || errorInfo.isRateLimit) {
-                // Mark this key as quota exhausted for flash model - prevents reuse today
-                await markKeyQuotaExhausted(supabaseServiceClient, keyId, 'flash');
+                // Mark this key as quota exhausted for flash_2_5 model - prevents reuse today
+                await markKeyQuotaExhausted(supabaseServiceClient, keyId, 'flash_2_5');
                 await incrementKeyErrorCount(supabaseServiceClient, keyId);
                 console.log(`[evaluate-ai-speaking-part] Key ${keyId} marked as quota exhausted`);
                 return false; // Try next pool key
