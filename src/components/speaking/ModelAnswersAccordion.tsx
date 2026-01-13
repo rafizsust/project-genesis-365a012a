@@ -1,26 +1,30 @@
-import { useState, useMemo } from 'react';
+import { useMemo } from 'react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
-import { Sparkles, ChevronDown, ChevronUp, Lightbulb, CheckCircle2, Columns } from 'lucide-react';
+import { Sparkles, ArrowUp, CheckCircle2, Lightbulb, Target } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { Toggle } from '@/components/ui/toggle';
 
 interface ModelAnswer {
   partNumber: number;
   question: string;
   questionNumber?: number;
   candidateResponse?: string;
-  modelAnswer?: string; // Legacy - treated as Band 8
+  // New format: single targeted model answer
+  estimatedBand?: number;
+  targetBand?: number;
+  modelAnswer?: string;
+  whyItWorks?: string[];
+  keyImprovements?: string[];
+  // Legacy format support
   modelAnswerBand6?: string;
   modelAnswerBand7?: string;
   modelAnswerBand8?: string;
   modelAnswerBand9?: string;
-  keyFeatures?: string[];
   whyBand6Works?: string[];
   whyBand7Works?: string[];
   whyBand8Works?: string[];
   whyBand9Works?: string[];
+  keyFeatures?: string[];
 }
 
 interface ModelAnswersAccordionProps {
@@ -38,134 +42,129 @@ const BAND_CONFIG = {
 
 type BandLevel = keyof typeof BAND_CONFIG;
 
-/**
- * Get the closest band level based on user's achieved score
- * Score 7.5 → Band 8 (rounds to nearest), Score 3.5 → Band 6 (min), Score 8.5 → Band 9
- */
-function getClosestBand(userScore?: number): BandLevel {
-  if (!userScore || userScore < 6) return 6; // Below 6 → show Band 6 (lowest available)
-  
-  // Round to nearest band level
-  const rounded = Math.round(userScore);
-  
-  // Clamp to available bands (6-9)
-  if (rounded <= 6) return 6;
-  if (rounded >= 9) return 9;
-  return rounded as BandLevel;
+function getBandConfig(band: number) {
+  const roundedBand = Math.min(9, Math.max(6, Math.round(band))) as BandLevel;
+  return BAND_CONFIG[roundedBand] || BAND_CONFIG[7];
 }
 
-function BandAnswerSection({
-  band,
-  answer,
-  whyItWorks,
-  isOpen,
-  onToggle,
-  candidateResponse,
-  showComparison,
+function QuestionModelAnswer({
+  model,
+  index,
 }: {
-  band: BandLevel;
-  answer: string;
-  whyItWorks?: string[];
-  isOpen: boolean;
-  onToggle: () => void;
-  candidateResponse?: string;
-  showComparison: boolean;
+  model: ModelAnswer;
+  index: number;
 }) {
-  const config = BAND_CONFIG[band];
+  // Determine if using new format (single targetBand + modelAnswer) or legacy (multiple band answers)
+  const isNewFormat = model.targetBand !== undefined && model.modelAnswer;
+  
+  // For legacy format, pick the closest band answer based on estimated or overall score
+  const legacyAnswer = useMemo(() => {
+    if (isNewFormat) return null;
+    
+    // Try to find any available model answer from legacy format
+    if (model.modelAnswerBand7) return { band: 7, answer: model.modelAnswerBand7, why: model.whyBand7Works };
+    if (model.modelAnswerBand8) return { band: 8, answer: model.modelAnswerBand8, why: model.whyBand8Works };
+    if (model.modelAnswerBand6) return { band: 6, answer: model.modelAnswerBand6, why: model.whyBand6Works };
+    if (model.modelAnswerBand9) return { band: 9, answer: model.modelAnswerBand9, why: model.whyBand9Works };
+    
+    return null;
+  }, [model, isNewFormat]);
+
+  const targetBand = isNewFormat ? model.targetBand! : (legacyAnswer?.band || 7);
+  const modelAnswerText = isNewFormat ? model.modelAnswer! : (legacyAnswer?.answer || '');
+  const whyItWorks = isNewFormat ? model.whyItWorks : (legacyAnswer?.why || model.keyFeatures);
+  const keyImprovements = model.keyImprovements;
+  
+  const config = getBandConfig(targetBand);
+
+  if (!modelAnswerText) {
+    return null;
+  }
 
   return (
-    <Collapsible open={isOpen} onOpenChange={onToggle}>
-      <CollapsibleTrigger className="w-full">
-        <div className={cn(
-          "flex items-center justify-between p-3 rounded-lg border-l-4 transition-colors",
-          config.color,
-          isOpen ? config.bgColor : "bg-muted/30 hover:bg-muted/50"
-        )}>
-          <div className="flex items-center gap-2">
-            <Badge variant="outline" className={cn("text-xs font-bold", config.textColor, config.bgColor)}>
-              {config.label}
-            </Badge>
-            <span className="text-sm text-muted-foreground">Model Answer</span>
+    <div className="border rounded-lg p-3 md:p-4 space-y-4">
+      {/* Question Header */}
+      <div className="flex items-start gap-2">
+        <Badge variant="outline" className="text-xs shrink-0">
+          Q{model.questionNumber || index + 1}
+        </Badge>
+        <p className="text-sm font-medium">{model.question}</p>
+      </div>
+      
+      {/* Candidate's Response */}
+      {model.candidateResponse && (
+        <div className="pl-3 md:pl-4 border-l-2 border-muted">
+          <div className="flex items-center gap-2 mb-1">
+            <p className="text-[10px] md:text-xs text-muted-foreground">Your response</p>
+            {model.estimatedBand && (
+              <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                ~Band {model.estimatedBand.toFixed(1)}
+              </Badge>
+            )}
           </div>
-          {isOpen ? (
-            <ChevronUp className="w-4 h-4 text-muted-foreground" />
-          ) : (
-            <ChevronDown className="w-4 h-4 text-muted-foreground" />
-          )}
+          <p className="text-xs md:text-sm italic text-muted-foreground">{model.candidateResponse}</p>
         </div>
-      </CollapsibleTrigger>
-      <CollapsibleContent>
-        <div className="pt-3 space-y-3">
-          {/* Comparison View - Side by Side */}
-          {showComparison && candidateResponse ? (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <div className="space-y-1">
-                <p className="text-xs font-medium text-muted-foreground">Your Response</p>
-                <div className="text-sm leading-relaxed p-3 bg-muted/30 rounded-lg border-l-2 border-muted">
-                  {candidateResponse}
-                </div>
-              </div>
-              <div className="space-y-1">
-                <p className={cn("text-xs font-medium", config.textColor)}>{config.label} Model Answer</p>
-                <div className={cn("text-sm leading-relaxed p-3 rounded-lg border-l-2", config.bgColor, config.color)}>
-                  {answer}
-                </div>
-              </div>
-            </div>
-          ) : (
-            <p className="text-sm leading-relaxed pl-4 border-l-2 border-muted">
-              {answer}
+      )}
+      
+      {/* Target Model Answer - The Next Level */}
+      <div className={cn(
+        "rounded-lg border-l-4 p-3 md:p-4 space-y-3",
+        config.color,
+        config.bgColor
+      )}>
+        <div className="flex items-center gap-2">
+          <ArrowUp className={cn("w-4 h-4", config.textColor)} />
+          <Badge className={cn("text-xs font-bold", config.textColor, config.bgColor, "border", config.color)}>
+            {config.label}
+          </Badge>
+          <span className="text-xs text-muted-foreground">Target Answer</span>
+        </div>
+        
+        <p className="text-sm leading-relaxed">
+          {modelAnswerText}
+        </p>
+        
+        {/* Why This Band Works */}
+        {whyItWorks && whyItWorks.length > 0 && (
+          <div className="pt-2 border-t border-border/50">
+            <p className={cn("text-xs font-medium mb-2 flex items-center gap-1", config.textColor)}>
+              <Lightbulb className="w-3 h-3" />
+              Why this is {config.label}:
             </p>
-          )}
-          
-          {whyItWorks && whyItWorks.length > 0 && (
-            <div className={cn("rounded-lg p-3", config.bgColor)}>
-              <p className={cn("text-xs font-medium mb-2 flex items-center gap-1", config.textColor)}>
-                <Lightbulb className="w-3 h-3" />
-                Why {config.label} Works:
-              </p>
-              <ul className="space-y-1">
-                {whyItWorks.map((feature, j) => (
-                  <li key={j} className="text-xs text-muted-foreground flex items-start gap-2">
-                    <CheckCircle2 className={cn("w-3 h-3 flex-shrink-0 mt-0.5", config.textColor)} />
-                    {feature}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </div>
-      </CollapsibleContent>
-    </Collapsible>
+            <ul className="space-y-1">
+              {whyItWorks.map((feature, j) => (
+                <li key={j} className="text-xs text-muted-foreground flex items-start gap-2">
+                  <CheckCircle2 className={cn("w-3 h-3 flex-shrink-0 mt-0.5", config.textColor)} />
+                  {feature}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        
+        {/* Key Improvements to Reach This Level */}
+        {keyImprovements && keyImprovements.length > 0 && (
+          <div className="pt-2 border-t border-border/50">
+            <p className="text-xs font-medium mb-2 flex items-center gap-1 text-primary">
+              <Target className="w-3 h-3" />
+              To reach this level:
+            </p>
+            <ul className="space-y-1">
+              {keyImprovements.map((improvement, j) => (
+                <li key={j} className="text-xs text-muted-foreground flex items-start gap-2">
+                  <span className="text-primary">•</span>
+                  {improvement}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
 export function ModelAnswersAccordion({ modelAnswers, userBandScore, className }: ModelAnswersAccordionProps) {
-  const closestBand = useMemo(() => getClosestBand(userBandScore), [userBandScore]);
-  const [showComparison, setShowComparison] = useState(false);
-  
-  // Track which bands are open for each question - closest band is open by default
-  const [openBands, setOpenBands] = useState<Record<string, Set<BandLevel>>>(() => {
-    const initial: Record<string, Set<BandLevel>> = {};
-    modelAnswers.forEach((_, i) => {
-      initial[`q${i}`] = new Set([closestBand]);
-    });
-    return initial;
-  });
-
-  const toggleBand = (questionKey: string, band: BandLevel) => {
-    setOpenBands(prev => {
-      const current = prev[questionKey] || new Set();
-      const next = new Set(current);
-      if (next.has(band)) {
-        next.delete(band);
-      } else {
-        next.add(band);
-      }
-      return { ...prev, [questionKey]: next };
-    });
-  };
-
   // Group by part
   const groupedByPart = useMemo(() => {
     const groups: Record<number, ModelAnswer[]> = {};
@@ -177,12 +176,6 @@ export function ModelAnswersAccordion({ modelAnswers, userBandScore, className }
     });
     return groups;
   }, [modelAnswers]);
-
-  // Check if any model answer has candidate response for comparison toggle
-  const hasAnyCandidateResponse = useMemo(() => 
-    modelAnswers.some(m => !!m.candidateResponse), 
-    [modelAnswers]
-  );
 
   if (!modelAnswers || modelAnswers.length === 0) {
     return (
@@ -199,35 +192,19 @@ export function ModelAnswersAccordion({ modelAnswers, userBandScore, className }
   return (
     <Card className={className}>
       <CardHeader className="p-3 md:p-6">
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-          <div className="space-y-1">
-            <CardTitle className="flex items-center gap-2 text-base md:text-lg">
-              <Sparkles className="w-4 h-4 md:w-5 md:h-5 text-primary" />
-              Model Answers (Band 6 - 9)
-            </CardTitle>
-            <CardDescription className="text-xs md:text-sm">
-              Compare responses at different band levels. 
-              {userBandScore && (
-                <span className="font-medium text-primary">
-                  {' '}Based on your score of {userBandScore.toFixed(1)}, Band {closestBand} is highlighted.
-                </span>
-              )}
-            </CardDescription>
-          </div>
-          
-          {/* Comparison Toggle */}
-          {hasAnyCandidateResponse && (
-            <Toggle
-              pressed={showComparison}
-              onPressedChange={setShowComparison}
-              size="sm"
-              className="gap-1.5 text-xs"
-              aria-label="Toggle comparison view"
-            >
-              <Columns className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Compare</span>
-            </Toggle>
-          )}
+        <div className="space-y-1">
+          <CardTitle className="flex items-center gap-2 text-base md:text-lg">
+            <Sparkles className="w-4 h-4 md:w-5 md:h-5 text-primary" />
+            Model Answers — Your Next Level
+          </CardTitle>
+          <CardDescription className="text-xs md:text-sm">
+            Each model answer shows exactly one band higher than your current level — the next achievable step. 
+            {userBandScore && (
+              <span className="font-medium text-primary">
+                {' '}Your overall score: {userBandScore.toFixed(1)}
+              </span>
+            )}
+          </CardDescription>
         </div>
       </CardHeader>
       <CardContent className="space-y-6 p-3 md:p-6 pt-0 md:pt-0">
@@ -244,57 +221,14 @@ export function ModelAnswersAccordion({ modelAnswers, userBandScore, className }
               </div>
               
               {answers.map((model) => {
-                const questionKey = `q${globalIndex}`;
-                const openSet = openBands[questionKey] || new Set([closestBand]);
-                
-                // Get available band answers
-                const bandAnswers: { band: BandLevel; answer: string; whyItWorks?: string[] }[] = [];
-                
-                if (model.modelAnswerBand6) {
-                  bandAnswers.push({ band: 6, answer: model.modelAnswerBand6, whyItWorks: model.whyBand6Works });
-                }
-                if (model.modelAnswerBand7) {
-                  bandAnswers.push({ band: 7, answer: model.modelAnswerBand7, whyItWorks: model.whyBand7Works });
-                }
-                // Handle legacy modelAnswer as Band 8
-                const band8Answer = model.modelAnswerBand8 || model.modelAnswer;
-                if (band8Answer) {
-                  bandAnswers.push({ band: 8, answer: band8Answer, whyItWorks: model.whyBand8Works || model.keyFeatures });
-                }
-                if (model.modelAnswerBand9) {
-                  bandAnswers.push({ band: 9, answer: model.modelAnswerBand9, whyItWorks: model.whyBand9Works });
-                }
-                
+                const idx = globalIndex;
                 globalIndex++;
-                
                 return (
-                  <div key={`${partNum}-${model.questionNumber || globalIndex}`} className="border rounded-lg p-3 md:p-4 space-y-4">
-                    <p className="text-sm font-medium">{model.question}</p>
-                    
-                    {/* Candidate's Response - Only show if not in comparison mode */}
-                    {model.candidateResponse && !showComparison && (
-                      <div className="pl-3 md:pl-4 border-l-2 border-muted">
-                        <p className="text-[10px] md:text-xs text-muted-foreground mb-1">Your response:</p>
-                        <p className="text-xs md:text-sm italic text-muted-foreground">{model.candidateResponse}</p>
-                      </div>
-                    )}
-                    
-                    {/* Band Answer Sections */}
-                    <div className="space-y-2">
-                      {bandAnswers.map(({ band, answer, whyItWorks }) => (
-                        <BandAnswerSection
-                          key={band}
-                          band={band}
-                          answer={answer}
-                          whyItWorks={whyItWorks}
-                          isOpen={openSet.has(band)}
-                          onToggle={() => toggleBand(questionKey, band)}
-                          candidateResponse={model.candidateResponse}
-                          showComparison={showComparison}
-                        />
-                      ))}
-                    </div>
-                  </div>
+                  <QuestionModelAnswer
+                    key={`${partNum}-${model.questionNumber || idx}`}
+                    model={model}
+                    index={idx}
+                  />
                 );
               })}
             </div>

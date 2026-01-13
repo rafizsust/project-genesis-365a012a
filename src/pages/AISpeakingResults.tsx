@@ -59,11 +59,18 @@ interface PartAnalysis {
 interface ModelAnswer {
   partNumber: number;
   question: string;
+  questionNumber?: number;
   candidateResponse?: string;
-  modelAnswer?: string; // Legacy single model answer (Band 8+)
-  modelAnswerBand7?: string; // New: Band 7 model answer
-  modelAnswerBand8?: string; // New: Band 8 model answer
-  keyFeatures: string[];
+  // New format: single targeted model answer
+  estimatedBand?: number;
+  targetBand?: number;
+  modelAnswer?: string;
+  whyItWorks?: string[];
+  keyImprovements?: string[];
+  // Legacy format support
+  modelAnswerBand7?: string;
+  modelAnswerBand8?: string;
+  keyFeatures?: string[];
 }
 
 interface TranscriptEntry {
