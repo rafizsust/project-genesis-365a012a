@@ -661,6 +661,47 @@ export type Database = {
         }
         Relationships: []
       }
+      model_performance_logs: {
+        Row: {
+          api_key_id: string | null
+          created_at: string
+          error_message: string | null
+          id: string
+          model_name: string
+          response_time_ms: number | null
+          status: string
+          task_type: string
+        }
+        Insert: {
+          api_key_id?: string | null
+          created_at?: string
+          error_message?: string | null
+          id?: string
+          model_name: string
+          response_time_ms?: number | null
+          status: string
+          task_type: string
+        }
+        Update: {
+          api_key_id?: string | null
+          created_at?: string
+          error_message?: string | null
+          id?: string
+          model_name?: string
+          response_time_ms?: number | null
+          status?: string
+          task_type?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "model_performance_logs_api_key_id_fkey"
+            columns: ["api_key_id"]
+            isOneToOne: false
+            referencedRelation: "api_keys"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       profiles: {
         Row: {
           avatar_url: string | null
@@ -1692,6 +1733,19 @@ export type Database = {
       }
       cleanup_old_data: { Args: never; Returns: Json }
       get_credit_status: { Args: { p_user_id: string }; Returns: Json }
+      get_model_performance_stats: {
+        Args: { p_hours?: number }
+        Returns: {
+          avg_response_time_ms: number
+          error_count: number
+          model_name: string
+          quota_exceeded_count: number
+          success_count: number
+          success_rate: number
+          task_type: string
+          total_calls: number
+        }[]
+      }
       has_active_subscription: { Args: { p_user_id: string }; Returns: boolean }
       increment_topic_completion: {
         Args: { p_module: string; p_topic: string; p_user_id: string }
@@ -1699,6 +1753,17 @@ export type Database = {
       }
       is_admin: { Args: { check_user_id: string }; Returns: boolean }
       is_promotion_active: { Args: never; Returns: boolean }
+      log_model_performance: {
+        Args: {
+          p_api_key_id: string
+          p_error_message?: string
+          p_model_name: string
+          p_response_time_ms?: number
+          p_status: string
+          p_task_type: string
+        }
+        Returns: undefined
+      }
       refund_credits: {
         Args: { p_cost: number; p_user_id: string }
         Returns: undefined

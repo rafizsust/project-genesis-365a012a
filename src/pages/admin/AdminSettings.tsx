@@ -7,6 +7,7 @@ import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { 
   Key, 
   Plus, 
@@ -15,7 +16,9 @@ import {
   Settings, 
   CheckCircle,
   Eye,
-  EyeOff
+  EyeOff,
+  Gauge,
+  BarChart3
 } from 'lucide-react';
 import {
   Table,
@@ -45,6 +48,8 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
+import ApiKeyQuotaDashboard from '@/components/admin/ApiKeyQuotaDashboard';
+import ModelPerformanceAnalytics from '@/components/admin/ModelPerformanceAnalytics';
 
 interface ApiKey {
   id: string;
@@ -57,6 +62,12 @@ interface ApiKey {
   tts_quota_exhausted_date: string | null;
   flash_2_5_quota_exhausted: boolean | null;
   flash_2_5_quota_exhausted_date: string | null;
+  flash_lite_quota_exhausted: boolean | null;
+  flash_lite_quota_exhausted_date: string | null;
+  pro_3_0_quota_exhausted: boolean | null;
+  pro_3_0_quota_exhausted_date: string | null;
+  exp_pro_quota_exhausted: boolean | null;
+  exp_pro_quota_exhausted_date: string | null;
 }
 
 export default function AdminSettings() {
@@ -190,17 +201,19 @@ export default function AdminSettings() {
     }
   };
 
-  const resetQuota = async (id: string, quotaType: 'tts' | 'flash_2_5' | 'all') => {
+  const resetQuota = async (id: string, quotaType: 'tts' | 'flash_2_5' | 'flash_lite' | 'pro_3_0' | 'exp_pro' | 'all') => {
     try {
-      const updateData: Record<string, any> = { updated_at: new Date().toISOString() };
+      const updateData: Record<string, unknown> = { updated_at: new Date().toISOString() };
+      const quotaTypes = ['tts', 'flash_2_5', 'flash_lite', 'pro_3_0', 'exp_pro'];
       
-      if (quotaType === 'tts' || quotaType === 'all') {
-        updateData.tts_quota_exhausted = false;
-        updateData.tts_quota_exhausted_date = null;
-      }
-      if (quotaType === 'flash_2_5' || quotaType === 'all') {
-        updateData.flash_2_5_quota_exhausted = false;
-        updateData.flash_2_5_quota_exhausted_date = null;
+      if (quotaType === 'all') {
+        quotaTypes.forEach(qt => {
+          updateData[`${qt}_quota_exhausted`] = false;
+          updateData[`${qt}_quota_exhausted_date`] = null;
+        });
+      } else {
+        updateData[`${quotaType}_quota_exhausted`] = false;
+        updateData[`${quotaType}_quota_exhausted_date`] = null;
       }
 
       const { error } = await supabase
@@ -211,20 +224,26 @@ export default function AdminSettings() {
       if (error) throw error;
 
       setApiKeys(prev =>
-        prev.map(key =>
-          key.id === id
-            ? {
-                ...key,
-                ...(quotaType === 'tts' || quotaType === 'all' ? { tts_quota_exhausted: false, tts_quota_exhausted_date: null } : {}),
-                ...(quotaType === 'flash_2_5' || quotaType === 'all' ? { flash_2_5_quota_exhausted: false, flash_2_5_quota_exhausted_date: null } : {}),
-              }
-            : key
-        )
+        prev.map(key => {
+          if (key.id !== id) return key;
+          const updates: Partial<ApiKey> = {};
+          if (quotaType === 'all') {
+            quotaTypes.forEach(qt => {
+              (updates as Record<string, unknown>)[`${qt}_quota_exhausted`] = false;
+              (updates as Record<string, unknown>)[`${qt}_quota_exhausted_date`] = null;
+            });
+          } else {
+            (updates as Record<string, unknown>)[`${quotaType}_quota_exhausted`] = false;
+            (updates as Record<string, unknown>)[`${quotaType}_quota_exhausted_date`] = null;
+          }
+          return { ...key, ...updates };
+        })
       );
 
+      const quotaLabel = quotaType === 'all' ? 'All quotas' : quotaType.replace(/_/g, ' ').toUpperCase() + ' quota';
       toast({
         title: 'Success',
-        description: `${quotaType === 'all' ? 'All quotas' : (quotaType === 'flash_2_5' ? 'Flash 2.5' : 'TTS') + ' quota'} reset successfully`,
+        description: `${quotaLabel} reset successfully`,
       });
     } catch (error) {
       console.error('Error resetting quota:', error);
@@ -245,6 +264,12 @@ export default function AdminSettings() {
           tts_quota_exhausted_date: null,
           flash_2_5_quota_exhausted: false,
           flash_2_5_quota_exhausted_date: null,
+          flash_lite_quota_exhausted: false,
+          flash_lite_quota_exhausted_date: null,
+          pro_3_0_quota_exhausted: false,
+          pro_3_0_quota_exhausted_date: null,
+          exp_pro_quota_exhausted: false,
+          exp_pro_quota_exhausted_date: null,
           updated_at: new Date().toISOString(),
         })
         .eq('provider', 'gemini');
@@ -258,6 +283,12 @@ export default function AdminSettings() {
           tts_quota_exhausted_date: null,
           flash_2_5_quota_exhausted: false,
           flash_2_5_quota_exhausted_date: null,
+          flash_lite_quota_exhausted: false,
+          flash_lite_quota_exhausted_date: null,
+          pro_3_0_quota_exhausted: false,
+          pro_3_0_quota_exhausted_date: null,
+          exp_pro_quota_exhausted: false,
+          exp_pro_quota_exhausted_date: null,
         }))
       );
 
@@ -305,8 +336,25 @@ export default function AdminSettings() {
         </div>
       </div>
 
-      {/* API Keys Section */}
-      <Card className="border-0 shadow-lg">
+      <Tabs defaultValue="keys" className="space-y-6">
+        <TabsList className="grid w-full max-w-md grid-cols-3">
+          <TabsTrigger value="keys" className="flex items-center gap-2">
+            <Key className="w-4 h-4" />
+            API Keys
+          </TabsTrigger>
+          <TabsTrigger value="quotas" className="flex items-center gap-2">
+            <Gauge className="w-4 h-4" />
+            Quotas
+          </TabsTrigger>
+          <TabsTrigger value="analytics" className="flex items-center gap-2">
+            <BarChart3 className="w-4 h-4" />
+            Analytics
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="keys">
+          {/* API Keys Section */}
+          <Card className="border-0 shadow-lg">
         <CardHeader className="flex flex-row items-center justify-between">
           <div>
             <CardTitle className="flex items-center gap-2">
@@ -513,6 +561,16 @@ export default function AdminSettings() {
           )}
         </CardContent>
       </Card>
+        </TabsContent>
+
+        <TabsContent value="quotas">
+          <ApiKeyQuotaDashboard />
+        </TabsContent>
+
+        <TabsContent value="analytics">
+          <ModelPerformanceAnalytics />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
