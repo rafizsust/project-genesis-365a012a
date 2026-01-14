@@ -1229,7 +1229,23 @@ function normalizeEvaluationResponse(data: any): any {
   const ensureArray = (val: any) => (Array.isArray(val) ? val : []);
 
   // Extract question scores for per-question evaluation
-  const questionScores = ensureArray(data.questionScores ?? data.question_scores ?? []);
+  // Try questionScores first, then fall back to extracting from modelAnswers
+  let questionScores = ensureArray(data.questionScores ?? data.question_scores ?? []);
+  
+  // If questionScores is empty, extract scores from modelAnswers.estimatedBand or questionBandScore
+  const rawModelAnswers = ensureArray(data.modelAnswers ?? data.model_answers ?? []);
+  if (questionScores.length === 0 && rawModelAnswers.length > 0) {
+    console.log(`[evaluate-ai-speaking] No questionScores array, extracting from ${rawModelAnswers.length} modelAnswers`);
+    questionScores = rawModelAnswers.map((ma: any) => {
+      const partNum = ma.partNumber ?? ma.part_number ?? 1;
+      const qNum = ma.questionNumber ?? ma.question_number ?? 1;
+      const score = ma.estimatedBand ?? ma.estimated_band ?? ma.questionBandScore ?? ma.question_band_score ?? 0;
+      const audioKey = `part${partNum}-q${qNum}`;
+      return { audioKey, score };
+    });
+    console.log(`[evaluate-ai-speaking] Extracted question scores: ${questionScores.map((q: any) => `${q.audioKey}=${q.score}`).join(', ')}`);
+  }
+  
   const minimalResponseCount = data.minimalResponseCount ?? data.minimal_response_count ?? 0;
   const totalQuestionCount = data.totalQuestionCount ?? data.total_question_count ?? questionScores.length;
 
@@ -1246,7 +1262,10 @@ function normalizeEvaluationResponse(data: any): any {
     ? Math.round((criterionScores.reduce((a, b) => a + b, 0) / criterionScores.length) * 2) / 2
     : (data.overallBand ?? data.overall_band ?? 0);
   
-  // If we have question scores, use them as an additional validation layer
+  console.log(`[evaluate-ai-speaking] Criterion scores: F=${fluencyScore}, L=${lexicalScore}, G=${grammaticalScore}, P=${pronunciationScore}`);
+  console.log(`[evaluate-ai-speaking] Calculated overall from criteria: ${calculatedOverallBand}`);
+  
+  // If we have question scores, use them as THE PRIMARY source for overall band
   let overallBand = calculatedOverallBand;
   
   if (questionScores.length > 0) {
@@ -1272,32 +1291,41 @@ function normalizeEvaluationResponse(data: any): any {
     if (partsWithScores.length > 0) {
       const weightedAvgQuestionScore = partsWithScores.reduce((sum, p) => sum + p.avgScore, 0) / partsWithScores.length;
       console.log(`[evaluate-ai-speaking] Weighted avg question score: ${weightedAvgQuestionScore.toFixed(2)} from ${partsWithScores.length} parts`);
+      console.log(`[evaluate-ai-speaking] Per-part averages: ${partsWithScores.map(p => `P${p.partNum}=${p.avgScore.toFixed(1)}`).join(', ')}`);
+      
+      // Count minimal responses (score <= 2)
+      const minimalCount = questionScores.filter((qs: any) => typeof qs.score === 'number' && qs.score <= 2).length;
+      const actualMinimalRatio = minimalCount / questionScores.length;
+      console.log(`[evaluate-ai-speaking] Minimal responses: ${minimalCount}/${questionScores.length} (${(actualMinimalRatio * 100).toFixed(0)}%)`);
       
       // Apply penalty caps based on minimal response count
       let maxAllowedBand = 9.0;
-      const minimalRatio = minimalResponseCount / Math.max(totalQuestionCount, 1);
+      const minimalRatio = Math.max(actualMinimalRatio, minimalResponseCount / Math.max(totalQuestionCount, 1));
       
-      if (minimalRatio > 0.5) {
-        maxAllowedBand = 4.0; // More than 50% minimal responses
+      if (minimalRatio >= 0.5) {
+        maxAllowedBand = 4.0; // 50% or more minimal responses
         console.log(`[evaluate-ai-speaking] Capping band to ${maxAllowedBand} due to ${(minimalRatio * 100).toFixed(0)}% minimal responses`);
-      } else if (minimalRatio > 0.3) {
-        maxAllowedBand = 5.0; // More than 30% minimal responses
+      } else if (minimalRatio >= 0.3) {
+        maxAllowedBand = 5.0; // 30% or more minimal responses
         console.log(`[evaluate-ai-speaking] Capping band to ${maxAllowedBand} due to ${(minimalRatio * 100).toFixed(0)}% minimal responses`);
       }
       
-      // Cap the overall band if it exceeds the maximum allowed
+      // PRIMARY RULE: Overall band should be based on weighted question average, not criterion scores
+      // The weighted average is the ground truth - add a small bonus (max 0.5) for criterion quality
+      const bonusFromCriteria = Math.min(0.5, Math.max(0, (calculatedOverallBand - weightedAvgQuestionScore) / 2));
+      const questionBasedBand = Math.round((weightedAvgQuestionScore + bonusFromCriteria) * 2) / 2;
+      console.log(`[evaluate-ai-speaking] Question-based band: ${questionBasedBand} (weighted avg: ${weightedAvgQuestionScore.toFixed(1)}, criteria bonus: ${bonusFromCriteria.toFixed(2)})`);
+      
+      // Take the lower of question-based and criterion-based scores
+      overallBand = Math.min(questionBasedBand, calculatedOverallBand);
+      
+      // Apply the cap for minimal responses
       if (overallBand > maxAllowedBand) {
-        console.log(`[evaluate-ai-speaking] Reducing overall band from ${overallBand} to ${maxAllowedBand} due to minimal responses`);
+        console.log(`[evaluate-ai-speaking] Reducing overall band from ${overallBand} to ${maxAllowedBand} due to minimal responses cap`);
         overallBand = maxAllowedBand;
       }
       
-      // STRICT VALIDATION: Overall band should not exceed weighted question average by more than 1.0
-      // This ensures Gemini can't inflate scores by only focusing on good responses
-      if (overallBand > weightedAvgQuestionScore + 1.0) {
-        const adjustedBand = Math.round((weightedAvgQuestionScore + 0.5) * 2) / 2; // Round to nearest 0.5
-        console.log(`[evaluate-ai-speaking] STRICT adjustment: overall band from ${overallBand} to ${adjustedBand} (weighted avg: ${weightedAvgQuestionScore.toFixed(1)})`);
-        overallBand = adjustedBand;
-      }
+      console.log(`[evaluate-ai-speaking] FINAL overall band: ${overallBand}`);
     }
   }
 
@@ -1323,8 +1351,8 @@ function normalizeEvaluationResponse(data: any): any {
   }));
 
   // Normalize model answers to ensure ALL band levels exist
-  const rawModelAnswers = ensureArray(data.modelAnswers ?? data.model_answers ?? []);
-  const normalizedModelAnswers = rawModelAnswers.map((ma: any) => {
+  const modelAnswersForNormalization = rawModelAnswers;
+  const normalizedModelAnswers = modelAnswersForNormalization.map((ma: any) => {
     const candidateResponse = ma.candidateResponse ?? ma.candidate_response ?? '';
     return {
       ...ma,
