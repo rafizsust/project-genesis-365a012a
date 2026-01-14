@@ -147,6 +147,9 @@ export default function AIPracticeSpeakingTest() {
     currentItem: 0,
     totalItems: 0,
   });
+  
+  // Track failed upload attempts for retry functionality
+  const [failedUploads, setFailedUploads] = useState<Array<{ key: string; error: string }>>([]);
 
   
   // Submission error state (for resubmit capability)
@@ -889,6 +892,7 @@ export default function AIPracticeSpeakingTest() {
 
     setPhase('submitting');
     setEvaluationStep(0);
+    setFailedUploads([]); // Reset failed uploads on new submission attempt
     setSubmissionProgress({ step: 'Preparing', detail: 'Getting ready to process your recordings...', currentItem: 0, totalItems: 0 });
 
     try {
@@ -918,6 +922,7 @@ export default function AIPracticeSpeakingTest() {
       // STEP 1: Upload all audio files to R2
       const filePaths: Record<string, string> = {};
       const durations: Record<string, number> = {};
+      const uploadErrors: Array<{ key: string; error: string }> = [];
 
       for (let i = 0; i < keys.length; i++) {
         const key = keys[i];
@@ -939,10 +944,17 @@ export default function AIPracticeSpeakingTest() {
         });
 
         // Convert to MP3 for compatibility
-        const mp3Blob = await toMp3DataUrl(blob, key).then(async (dataUrl) => {
-          const response = await fetch(dataUrl);
-          return response.blob();
-        });
+        let mp3Blob: Blob;
+        try {
+          mp3Blob = await toMp3DataUrl(blob, key).then(async (dataUrl) => {
+            const response = await fetch(dataUrl);
+            return response.blob();
+          });
+        } catch (convErr) {
+          console.error(`[AIPracticeSpeakingTest] Conversion error for ${key}:`, convErr);
+          uploadErrors.push({ key, error: 'Audio conversion failed' });
+          continue;
+        }
 
         // Update progress: Uploading audio
         setSubmissionProgress({ 
@@ -961,7 +973,11 @@ export default function AIPracticeSpeakingTest() {
             },
           });
 
-          if (uploadError) throw new Error(`Upload failed: ${uploadError.message}`);
+          if (uploadError) {
+            console.error(`[AIPracticeSpeakingTest] Upload error for ${key}:`, uploadError);
+            uploadErrors.push({ key, error: uploadError.message || 'Upload failed' });
+            continue;
+          }
 
           if (uploadResult?.uploadedUrls?.[key]) {
             const uploadedUrl = uploadResult.uploadedUrls[key];
@@ -970,23 +986,46 @@ export default function AIPracticeSpeakingTest() {
             const r2Key = urlParts.slice(3).join('/');
             filePaths[key] = r2Key;
             console.log(`[AIPracticeSpeakingTest] Uploaded ${key} -> ${r2Key}`);
+          } else {
+            uploadErrors.push({ key, error: 'Upload returned no URL' });
           }
         } catch (uploadErr) {
           console.error(`[AIPracticeSpeakingTest] Upload error for ${key}:`, uploadErr);
-          throw uploadErr;
+          uploadErrors.push({ key, error: uploadErr instanceof Error ? uploadErr.message : 'Upload failed' });
         }
       }
 
-      // Update progress after uploads complete
-      setSubmissionProgress({ 
-        step: 'Upload Complete', 
-        detail: `All ${totalAudioFiles} recordings uploaded successfully!`, 
-        currentItem: totalAudioFiles, 
-        totalItems: totalAudioFiles 
-      });
-
-      if (Object.keys(filePaths).length === 0) {
-        throw new Error('No audio files were uploaded');
+      // Track failed uploads for retry UI
+      if (uploadErrors.length > 0) {
+        setFailedUploads(uploadErrors);
+        
+        // If ALL uploads failed, show error state with retry
+        if (Object.keys(filePaths).length === 0) {
+          setSubmissionProgress({ 
+            step: 'Upload Failed', 
+            detail: `All ${uploadErrors.length} uploads failed. Click retry to try again.`, 
+            currentItem: 0, 
+            totalItems: uploadErrors.length 
+          });
+          throw new Error(`All audio uploads failed: ${uploadErrors.map(e => e.key).join(', ')}`);
+        }
+        
+        // Some uploads failed - show warning but continue with what we have
+        setSubmissionProgress({ 
+          step: 'Partial Upload', 
+          detail: `${Object.keys(filePaths).length} of ${totalAudioFiles} recordings uploaded. ${uploadErrors.length} failed.`, 
+          currentItem: Object.keys(filePaths).length, 
+          totalItems: totalAudioFiles 
+        });
+        console.warn(`[AIPracticeSpeakingTest] ${uploadErrors.length} uploads failed, continuing with ${Object.keys(filePaths).length} files`);
+      } else {
+        // All uploads successful
+        setSubmissionProgress({ 
+          step: 'Upload Complete', 
+          detail: `All ${totalAudioFiles} recordings uploaded successfully!`, 
+          currentItem: totalAudioFiles, 
+          totalItems: totalAudioFiles 
+        });
       }
 
       setEvaluationStep(2);
@@ -1894,6 +1933,44 @@ export default function AIPracticeSpeakingTest() {
                   <p className="text-xs text-muted-foreground">
                     {submissionProgress.currentItem} of {submissionProgress.totalItems} files processed
                   </p>
+                </div>
+              )}
+
+              {/* Failed uploads warning with retry button */}
+              {failedUploads.length > 0 && (
+                <div className="w-full p-3 rounded-lg bg-destructive/10 border border-destructive/30">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-sm font-medium text-destructive">
+                      {failedUploads.length} upload{failedUploads.length > 1 ? 's' : ''} failed
+                    </span>
+                    <Button 
+                      variant="outline" 
+                      size="sm" 
+                      onClick={handleResubmit}
+                      disabled={isResubmitting}
+                      className="border-destructive text-destructive hover:bg-destructive/10"
+                    >
+                      {isResubmitting ? (
+                        <>
+                          <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                          Retrying...
+                        </>
+                      ) : (
+                        <>
+                          <RotateCcw className="w-3 h-3 mr-1" />
+                          Retry All
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                  <div className="text-xs text-muted-foreground space-y-1">
+                    {failedUploads.slice(0, 3).map((f, i) => (
+                      <div key={i} className="truncate">• {f.key}: {f.error}</div>
+                    ))}
+                    {failedUploads.length > 3 && (
+                      <div>...and {failedUploads.length - 3} more</div>
+                    )}
+                  </div>
                 </div>
               )}
 

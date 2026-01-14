@@ -332,6 +332,51 @@ async function resetKeyErrorCount(supabaseServiceClient: any, keyId: string): Pr
   }
 }
 
+// Mark a model as quota exhausted for a specific key (for test generation)
+// Maps actual model names to database column prefixes
+const MODEL_TO_DB_COLUMN_MAP: Record<string, string> = {
+  'gemini-exp-1206': 'gemini_exp_1206',
+  'gemini-2.0-flash-exp': 'gemini_2_0_flash',
+  'gemini-2.5-flash': 'gemini_2_5_flash',
+  'gemini-2.0-flash': 'gemini_2_0_flash',
+  'gemini-2.5-pro': 'gemini_2_5_pro',
+  'gemini-3-pro-preview': 'gemini_3_pro',
+};
+
+async function markModelQuotaExhaustedForGeneration(
+  supabaseServiceClient: any,
+  keyId: string,
+  modelName: string
+): Promise<void> {
+  try {
+    const today = new Date().toISOString().split('T')[0];
+    const columnPrefix = MODEL_TO_DB_COLUMN_MAP[modelName];
+    
+    if (!columnPrefix) {
+      console.warn(`[markModelQuotaExhaustedForGeneration] Unknown model: ${modelName}, skipping quota tracking`);
+      return;
+    }
+    
+    const quotaField = `${columnPrefix}_exhausted`;
+    const quotaDateField = `${columnPrefix}_exhausted_date`;
+    
+    const updateData: Record<string, any> = {
+      [quotaField]: true,
+      [quotaDateField]: today,
+      updated_at: new Date().toISOString()
+    };
+    
+    await supabaseServiceClient
+      .from('api_keys')
+      .update(updateData)
+      .eq('id', keyId);
+    
+    console.log(`[markModelQuotaExhaustedForGeneration] Marked key ${keyId} as ${modelName} quota exhausted for ${today}`);
+  } catch (err) {
+    console.error(`[markModelQuotaExhaustedForGeneration] Failed to mark model quota exhausted:`, err);
+  }
+}
+
 // Pre-flight validation: Check API key validity without consuming generation quota
 // Uses a lightweight models/list call instead of a generation request
 async function preflightApiCheck(apiKey: string, skipPreflight: boolean = false): Promise<{ ok: boolean; error?: string }> {
@@ -507,13 +552,26 @@ async function callGemini(
           const errorStatus = errorData?.error?.status || '';
           
           if (response.status === 429 || errorStatus === 'RESOURCE_EXHAUSTED') {
+            // Check if this is a DAILY quota exhaustion (not just per-minute rate limit)
+            const isDailyQuota = 
+              errorMessage.toLowerCase().includes('check your plan') ||
+              errorMessage.toLowerCase().includes('billing') ||
+              errorMessage.toLowerCase().includes('daily') ||
+              errorMessage.toLowerCase().includes('per day') ||
+              (errorMessage.toLowerCase().includes('quota') && !errorMessage.toLowerCase().includes('per minute'));
+            
             // Key rotation: try next DB key if available
             if (dbKeys.length > 0 && currentKeyIndex < dbKeys.length - 1) {
-              console.log(`Key ${currentKeyIndex + 1} rate limited, rotating to next key...`);
+              console.log(`Key ${currentKeyIndex + 1} ${isDailyQuota ? 'DAILY QUOTA EXHAUSTED' : 'rate limited'} on ${model}, rotating to next key...`);
               
               // Increment error count for this key
               if (serviceClient && currentKeyRecord) {
                 await incrementKeyErrorCount(serviceClient, currentKeyRecord.id);
+                
+                // If it's daily quota exhaustion, mark this model as exhausted for this key
+                if (isDailyQuota) {
+                  await markModelQuotaExhaustedForGeneration(serviceClient, currentKeyRecord.id, model);
+                }
               }
               
               currentKeyIndex++;
@@ -525,16 +583,25 @@ async function callGemini(
             }
             
             // Check if it's a rate limit that might recover with waiting
-            if (retryCount < maxRetries) {
+            if (retryCount < maxRetries && !isDailyQuota) {
               console.log(`Rate limit hit on ${model}, will retry after backoff...`);
               await waitWithBackoff(retryCount);
               retryCount++;
               continue;
             }
             
+            // All retries and keys exhausted - mark all keys as exhausted for this model
+            if (isDailyQuota && serviceClient && dbKeys.length > 0) {
+              for (const key of dbKeys) {
+                await markModelQuotaExhaustedForGeneration(serviceClient, key.id, model);
+              }
+            }
+            
             // All retries and keys exhausted
             isQuotaExceeded = true;
-            lastGeminiError = 'QUOTA_EXCEEDED: All API keys have reached their rate limit. Please wait a few minutes and try again.';
+            lastGeminiError = isDailyQuota 
+              ? 'QUOTA_EXCEEDED: All API keys have exhausted their daily quota. Please try again tomorrow or add your own Gemini API key in Settings.'
+              : 'QUOTA_EXCEEDED: All API keys have reached their rate limit. Please wait a few minutes and try again.';
             break;
           } else if (response.status === 403 || errorStatus === 'PERMISSION_DENIED') {
             // Key is invalid - try next DB key
