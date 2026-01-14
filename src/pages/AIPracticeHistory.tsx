@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { ToastAction } from '@/components/ui/toast';
 import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/hooks/useAuth';
 import { useBrowserNotifications } from '@/hooks/useBrowserNotifications';
@@ -210,10 +211,22 @@ export default function AIPracticeHistory() {
             toast({
               title: '🎉 Speaking Evaluation Ready!',
               description: 'Your speaking test results are now available.',
+              action: (
+                <ToastAction 
+                  altText="View Results"
+                  onClick={() => navigate(`/ai-practice/speaking/results/${job.test_id}`)}
+                >
+                  View Results
+                </ToastAction>
+              ),
             });
 
+            // Browser notification with navigation - use window.location for reliability
+            const testResultsUrl = `/ai-practice/speaking/results/${job.test_id}`;
             notifyEvaluationComplete(undefined, () => {
-              navigate(`/ai-practice/speaking/results/${job.test_id}`);
+              console.log('[AIPracticeHistory] Notification clicked, navigating to:', testResultsUrl);
+              // Use window.location.href for more reliable navigation from notification context
+              window.location.href = testResultsUrl;
             });
 
             loadTests();

@@ -35,6 +35,8 @@ export function useBrowserNotifications() {
 
   const showNotification = useCallback(
     async ({ title, body, icon, tag, onClick }: NotificationOptions): Promise<boolean> => {
+      console.log('[Notifications] showNotification called:', { title, body, tag, hasOnClick: !!onClick });
+      
       if (!isSupported) {
         console.log('[Notifications] Not supported in this browser');
         return false;
@@ -43,38 +45,53 @@ export function useBrowserNotifications() {
       // Request permission if not already granted
       let currentPermission = permission;
       if (currentPermission === 'default') {
+        console.log('[Notifications] Permission is default, requesting...');
         const granted = await requestPermission();
-        if (!granted) return false;
+        if (!granted) {
+          console.log('[Notifications] Permission request denied');
+          return false;
+        }
         currentPermission = 'granted';
       }
 
       if (currentPermission !== 'granted') {
-        console.log('[Notifications] Permission denied');
+        console.log('[Notifications] Permission denied:', currentPermission);
         return false;
       }
 
       try {
+        console.log('[Notifications] Creating notification...');
         const notification = new Notification(title, {
           body,
           icon: icon || '/favicon.svg',
           tag: tag || 'ielts-dhaka',
-          requireInteraction: false,
+          requireInteraction: true, // Keep notification visible until user interacts
         });
 
         if (onClick) {
-          notification.onclick = () => {
-            window.focus();
-            onClick();
+          notification.onclick = (event) => {
+            event.preventDefault();
+            console.log('[Notifications] Notification clicked, executing onClick handler');
+            try {
+              window.focus();
+              onClick();
+            } catch (e) {
+              console.error('[Notifications] onClick handler error:', e);
+            }
             notification.close();
           };
         }
 
-        // Auto-close after 5 seconds
-        setTimeout(() => notification.close(), 5000);
+        // Auto-close after 10 seconds (increased from 5)
+        setTimeout(() => {
+          console.log('[Notifications] Auto-closing notification');
+          notification.close();
+        }, 10000);
 
+        console.log('[Notifications] Notification created successfully');
         return true;
       } catch (error) {
-        console.error('Failed to show notification:', error);
+        console.error('[Notifications] Failed to show notification:', error);
         return false;
       }
     },
