@@ -3,9 +3,10 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { GoogleGenerativeAI } from "https://esm.sh/@google/generative-ai@0.21.0";
 import { crypto } from "https://deno.land/std@0.168.0/crypto/mod.ts";
 import { 
-  getActiveGeminiKeysForModel, 
-  markKeyQuotaExhausted,
-  isQuotaExhaustedError
+  getActiveGeminiKeysForModels, 
+  markModelQuotaExhausted,
+  isQuotaExhaustedError,
+  isDailyQuotaExhaustedError
 } from "../_shared/apiKeyQuotaUtils.ts";
 
 /**
@@ -87,13 +88,7 @@ function extractRetryAfterSeconds(err: any): number | undefined {
   return undefined;
 }
 
-function isPermanentQuotaExhausted(err: any): boolean {
-  const msg = String(err?.message || err || '').toLowerCase();
-  if (msg.includes('check your plan') || msg.includes('billing')) return true;
-  if (msg.includes('limit: 0')) return true;
-  if (msg.includes('per day') && !msg.includes('retry')) return true;
-  return false;
-}
+// Removed isPermanentQuotaExhausted - use isDailyQuotaExhaustedError from shared utils instead
 
 serve(async (req) => {
   console.log(`[speaking-evaluate-job] Request at ${new Date().toISOString()}`);
@@ -310,8 +305,8 @@ serve(async (req) => {
       }
     }
 
-    // Admin keys
-    const dbApiKeys = await getActiveGeminiKeysForModel(supabaseService, 'flash_2_5');
+    // Admin keys - get keys available for ALL models we might use
+    const dbApiKeys = await getActiveGeminiKeysForModels(supabaseService, GEMINI_MODELS);
     for (const dbKey of dbApiKeys) {
       keyQueue.push({ key: dbKey.key_value, keyId: dbKey.id, isUserProvided: false });
     }
@@ -421,19 +416,12 @@ serve(async (req) => {
                 const errMsg = String(err?.message || '');
                 console.error(`[speaking-evaluate-job] ${modelName} failed (${attempt + 1}/${MAX_RETRIES}):`, errMsg.slice(0, 200));
 
-                // Determine correct quota bucket based on model name
-                const getQuotaBucketForModel = (model: string): 'flash_2_5' | 'flash_lite' => {
-                  if (model.includes('lite')) return 'flash_lite';
-                  return 'flash_2_5';
-                };
-
-                if (isPermanentQuotaExhausted(err)) {
-                  // Mark quota exhausted for THIS specific model bucket
-                  const quotaBucket = getQuotaBucketForModel(modelName);
-                  console.log(`[speaking-evaluate-job] Permanent quota exhausted for ${modelName}, marking bucket '${quotaBucket}' exhausted`);
+                // Check for PERMANENT daily quota exhaustion - use strict check
+                if (isDailyQuotaExhaustedError(err)) {
+                  console.log(`[speaking-evaluate-job] Daily quota exhausted for ${modelName}, marking model exhausted`);
                   
                   if (!candidateKey.isUserProvided && candidateKey.keyId) {
-                    await markKeyQuotaExhausted(supabaseService, candidateKey.keyId, quotaBucket);
+                    await markModelQuotaExhausted(supabaseService, candidateKey.keyId, modelName);
                   }
                   
                   // CRITICAL: Continue to next model instead of throwing

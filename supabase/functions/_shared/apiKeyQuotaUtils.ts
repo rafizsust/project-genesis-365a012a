@@ -261,8 +261,8 @@ export async function markKeyQuotaExhausted(
     console.error(`Failed to mark key quota exhausted:`, err);
   }
 }
-
 // Check if an error indicates *daily quota exhaustion* (NOT per-minute rate limiting)
+// This is a LOOSE check - returns true for any quota-related messaging
 export function isQuotaExhaustedError(error: any): boolean {
   if (!error) return false;
 
@@ -285,6 +285,48 @@ export function isQuotaExhaustedError(error: any): boolean {
     msg.includes('check your plan') ||
     msg.includes('billing')
   );
+}
+
+/**
+ * STRICT check for PERMANENT daily quota exhaustion
+ * Use this ONLY when deciding to mark a model as exhausted for the day.
+ * This should NOT return true for:
+ * - 429 rate limits (RPM/TPM)
+ * - Temporary resource exhaustion
+ * - Server errors
+ * 
+ * This SHOULD return true for:
+ * - Daily quota limit reached (billing/plan related)
+ * - Account-level restrictions
+ */
+export function isDailyQuotaExhaustedError(error: any): boolean {
+  if (!error) return false;
+
+  const errorMessage = typeof error === 'string'
+    ? error
+    : (error.message || error.error?.message || '');
+  
+  const msg = String(errorMessage).toLowerCase();
+
+  // ONLY mark as daily exhausted for clear billing/quota signals
+  // These indicate the key has truly hit its daily limit
+  if (msg.includes('check your plan')) return true;
+  if (msg.includes('billing')) return true;
+  if (msg.includes('limit: 0')) return true;
+  if (msg.includes('per day') && !msg.includes('retry')) return true;
+  if (msg.includes('daily quota') || msg.includes('daily limit')) return true;
+  if (msg.includes('quota exceeded') && (msg.includes('per day') || msg.includes('daily'))) return true;
+  
+  // Check for API response indicating permanent quota exhaustion
+  // Gemini returns specific error codes for daily quota vs rate limits
+  if (msg.includes('exhausted') && msg.includes('quota')) {
+    // Make sure it's not just a per-minute rate limit message
+    if (!msg.includes('per minute') && !msg.includes('rpm') && !msg.includes('tpm')) {
+      return true;
+    }
+  }
+  
+  return false;
 }
 
 // Reset quota exhaustion for a specific model on a key
