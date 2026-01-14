@@ -982,16 +982,23 @@ export type Database = {
           durations: Json | null
           file_paths: Json
           fluency_flag: boolean | null
+          google_file_uris: Json | null
+          heartbeat_at: string | null
           id: string
           last_error: string | null
+          lock_expires_at: string | null
+          lock_token: string | null
           max_retries: number | null
           preset_id: string | null
+          processing_started_at: string | null
           result_id: string | null
           retry_count: number | null
+          stage: string | null
           status: string
           test_id: string
           topic: string | null
           updated_at: string
+          upload_completed_at: string | null
           user_id: string
         }
         Insert: {
@@ -1001,16 +1008,23 @@ export type Database = {
           durations?: Json | null
           file_paths?: Json
           fluency_flag?: boolean | null
+          google_file_uris?: Json | null
+          heartbeat_at?: string | null
           id?: string
           last_error?: string | null
+          lock_expires_at?: string | null
+          lock_token?: string | null
           max_retries?: number | null
           preset_id?: string | null
+          processing_started_at?: string | null
           result_id?: string | null
           retry_count?: number | null
+          stage?: string | null
           status?: string
           test_id: string
           topic?: string | null
           updated_at?: string
+          upload_completed_at?: string | null
           user_id: string
         }
         Update: {
@@ -1020,16 +1034,23 @@ export type Database = {
           durations?: Json | null
           file_paths?: Json
           fluency_flag?: boolean | null
+          google_file_uris?: Json | null
+          heartbeat_at?: string | null
           id?: string
           last_error?: string | null
+          lock_expires_at?: string | null
+          lock_token?: string | null
           max_retries?: number | null
           preset_id?: string | null
+          processing_started_at?: string | null
           result_id?: string | null
           retry_count?: number | null
+          stage?: string | null
           status?: string
           test_id?: string
           topic?: string | null
           updated_at?: string
+          upload_completed_at?: string | null
           user_id?: string
         }
         Relationships: []

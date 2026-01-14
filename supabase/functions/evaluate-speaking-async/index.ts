@@ -122,19 +122,20 @@ serve(async (req) => {
           .in('status', ['pending', 'processing']);
       }
 
-      // Create new job record
+      // Create new job record with staged processing
       const { data: newJob, error: jobError } = await supabaseService
         .from('speaking_evaluation_jobs')
         .insert({
           user_id: user.id,
           test_id: testId,
           status: 'pending',
+          stage: 'pending_upload',
           file_paths: filePaths,
           durations: durations || {},
           topic,
           difficulty,
           fluency_flag: fluencyFlag || false,
-          max_retries: 3,
+          max_retries: 5,
           retry_count: 0,
         })
         .select()
@@ -153,11 +154,10 @@ serve(async (req) => {
 
     console.log(`[evaluate-speaking-async] Job ${retryJobId ? 'retry' : 'created'}: ${job.id}`);
 
-    // Trigger the processor asynchronously (fire and forget)
-    // Using fetch instead of supabase.functions.invoke for async behavior
-    const processorUrl = `${supabaseUrl}/functions/v1/process-speaking-job`;
+    // Trigger the job runner (watchdog/dispatcher) which will handle staged processing
+    const runnerUrl = `${supabaseUrl}/functions/v1/speaking-job-runner`;
     
-    fetch(processorUrl, {
+    fetch(runnerUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -165,9 +165,9 @@ serve(async (req) => {
       },
       body: JSON.stringify({ jobId: job.id }),
     }).then(res => {
-      console.log(`[evaluate-speaking-async] Processor triggered, status: ${res.status}`);
+      console.log(`[evaluate-speaking-async] Job runner triggered, status: ${res.status}`);
     }).catch(err => {
-      console.error('[evaluate-speaking-async] Failed to trigger processor:', err);
+      console.error('[evaluate-speaking-async] Failed to trigger job runner:', err);
     });
 
     // Return immediately - user gets instant feedback
