@@ -12,6 +12,10 @@ interface SpeechSynthesisConfig {
   onBoundary?: (charIndex: number) => void;
 }
 
+// Track current volume/muted state at module level for access during speech
+let currentTTSVolume = 1;
+let currentTTSMuted = false;
+
 export function useSpeechSynthesis(config: SpeechSynthesisConfig = {}) {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
@@ -176,7 +180,8 @@ export function useSpeechSynthesis(config: SpeechSynthesisConfig = {}) {
           utterance.lang = options?.lang ?? config.lang ?? 'en-GB';
           utterance.rate = options?.rate ?? config.rate ?? 0.95;
           utterance.pitch = options?.pitch ?? config.pitch ?? 1;
-          utterance.volume = options?.volume ?? config.volume ?? 1;
+          // Use current muted state and volume
+          utterance.volume = currentTTSMuted ? 0 : (options?.volume ?? currentTTSVolume ?? config.volume ?? 1);
 
           utterance.onstart = () => {
             if (activeSessionRef.current !== sessionId) return;
@@ -289,6 +294,16 @@ export function useSpeechSynthesis(config: SpeechSynthesisConfig = {}) {
     }
   }, [voices]);
 
+  // Set volume for TTS (0-1)
+  const setVolume = useCallback((vol: number) => {
+    currentTTSVolume = Math.max(0, Math.min(1, vol));
+  }, []);
+
+  // Set muted state for TTS
+  const setMuted = useCallback((muted: boolean) => {
+    currentTTSMuted = muted;
+  }, []);
+
   return {
     isSpeaking,
     isPaused,
@@ -301,6 +316,8 @@ export function useSpeechSynthesis(config: SpeechSynthesisConfig = {}) {
     pause,
     resume,
     getBritishVoices,
-    setVoiceByName
+    setVoiceByName,
+    setVolume,
+    setMuted,
   };
 }

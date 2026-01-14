@@ -11,6 +11,9 @@ interface AudioVolumeControlProps {
   audioRef?: React.RefObject<HTMLAudioElement | null>;
   isPlaying?: boolean; // Show waveform animation when audio is playing
   className?: string;
+  // TTS control callbacks (for browser speech synthesis)
+  onTTSVolumeChange?: (v: number) => void;
+  onTTSMutedChange?: (m: boolean) => void;
 }
 
 export function AudioVolumeControl({
@@ -21,6 +24,8 @@ export function AudioVolumeControl({
   audioRef,
   isPlaying = false,
   className,
+  onTTSVolumeChange,
+  onTTSMutedChange,
 }: AudioVolumeControlProps) {
   const [showWaveform, setShowWaveform] = useState(false);
 
@@ -34,11 +39,14 @@ export function AudioVolumeControl({
     setVolume(newVolume);
     if (newVolume > 0 && isMuted) {
       setIsMuted(false);
+      onTTSMutedChange?.(false);
     }
     if (audioRef?.current) {
       audioRef.current.volume = newVolume;
       audioRef.current.muted = newVolume === 0;
     }
+    // Also update TTS volume
+    onTTSVolumeChange?.(newVolume);
   };
 
   const handleMuteToggle = () => {
@@ -48,6 +56,8 @@ export function AudioVolumeControl({
     if (audioRef?.current) {
       audioRef.current.muted = newMuted;
     }
+    // Also update TTS muted state
+    onTTSMutedChange?.(newMuted);
   };
 
   const displayVolume = isMuted ? 0 : Math.round(volume * 100);

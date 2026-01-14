@@ -9,7 +9,7 @@ import { useToast } from '@/hooks/use-toast';
 import { useTopicCompletions } from '@/hooks/useTopicCompletions';
 import { useSpeechSynthesis } from '@/hooks/useSpeechSynthesis';
 // TestStartOverlay removed - mic test is now the only entry point
-import { AILoadingScreen } from '@/components/common/AILoadingScreen';
+// AILoadingScreen removed - using custom inline progress UI
 import { ExitTestConfirmDialog } from '@/components/common/ExitTestConfirmDialog';
 import { MicrophoneTest } from '@/components/speaking/MicrophoneTest';
 import { describeApiError } from '@/lib/apiErrors';
@@ -136,9 +136,17 @@ export default function AIPracticeSpeakingTest() {
   const [isRecording, setIsRecording] = useState(false);
 
   // Background evaluation state (kept for compatibility but not used in async flow)
-  const [_partEvaluations] = useState<Record<number, any>>({});
+  const [_partEvaluations] = useState<Record<number, unknown>>({});
   const [_evaluatingParts] = useState<Set<number>>(new Set());
   const [evaluationStep, setEvaluationStep] = useState(0);
+  
+  // Detailed submission progress for real-time UI updates
+  const [submissionProgress, setSubmissionProgress] = useState({
+    step: '',
+    detail: '',
+    currentItem: 0,
+    totalItems: 0,
+  });
 
   
   // Submission error state (for resubmit capability)
@@ -881,6 +889,7 @@ export default function AIPracticeSpeakingTest() {
 
     setPhase('submitting');
     setEvaluationStep(0);
+    setSubmissionProgress({ step: 'Preparing', detail: 'Getting ready to process your recordings...', currentItem: 0, totalItems: 0 });
 
     try {
       const segments = audioSegmentsRef.current;
@@ -897,17 +906,21 @@ export default function AIPracticeSpeakingTest() {
       }
 
       // Get user ID
+      setSubmissionProgress({ step: 'Authenticating', detail: 'Verifying your session...', currentItem: 0, totalItems: 0 });
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error('User not authenticated');
 
       setEvaluationStep(1);
+      const totalAudioFiles = keys.length;
+      setSubmissionProgress({ step: 'Converting Audio', detail: `Preparing ${totalAudioFiles} audio files for upload...`, currentItem: 0, totalItems: totalAudioFiles });
       console.log('[AIPracticeSpeakingTest] Step 1: Uploading audio files to R2...');
 
       // STEP 1: Upload all audio files to R2
       const filePaths: Record<string, string> = {};
       const durations: Record<string, number> = {};
 
-      for (const key of keys) {
+      for (let i = 0; i < keys.length; i++) {
+        const key = keys[i];
         if (exitRequestedRef.current || !isMountedRef.current) return;
 
         const seg = segments[key];
@@ -917,10 +930,26 @@ export default function AIPracticeSpeakingTest() {
 
         if (blob.size === 0) continue;
 
+        // Update progress: Converting audio
+        setSubmissionProgress({ 
+          step: 'Converting Audio', 
+          detail: `Converting recording ${i + 1} of ${totalAudioFiles} to MP3...`, 
+          currentItem: i + 1, 
+          totalItems: totalAudioFiles 
+        });
+
         // Convert to MP3 for compatibility
         const mp3Blob = await toMp3DataUrl(blob, key).then(async (dataUrl) => {
           const response = await fetch(dataUrl);
           return response.blob();
+        });
+
+        // Update progress: Uploading audio
+        setSubmissionProgress({ 
+          step: 'Uploading Audio', 
+          detail: `Uploading recording ${i + 1} of ${totalAudioFiles}...`, 
+          currentItem: i + 1, 
+          totalItems: totalAudioFiles 
         });
 
         try {
@@ -948,11 +977,25 @@ export default function AIPracticeSpeakingTest() {
         }
       }
 
+      // Update progress after uploads complete
+      setSubmissionProgress({ 
+        step: 'Upload Complete', 
+        detail: `All ${totalAudioFiles} recordings uploaded successfully!`, 
+        currentItem: totalAudioFiles, 
+        totalItems: totalAudioFiles 
+      });
+
       if (Object.keys(filePaths).length === 0) {
         throw new Error('No audio files were uploaded');
       }
 
       setEvaluationStep(2);
+      setSubmissionProgress({ 
+        step: 'Queuing Evaluation', 
+        detail: 'Sending recordings to AI for analysis...', 
+        currentItem: 0, 
+        totalItems: 0 
+      });
       console.log(`[AIPracticeSpeakingTest] Step 2: Calling ASYNC evaluation (${Object.keys(filePaths).length} files)...`);
 
       // Calculate Part 2 fluency flag
@@ -984,6 +1027,12 @@ export default function AIPracticeSpeakingTest() {
       if (data?.jobId || data?.success) {
         console.log('[AIPracticeSpeakingTest] Evaluation job queued:', data.jobId || 'preset');
         setEvaluationStep(3);
+        setSubmissionProgress({ 
+          step: 'Submitted!', 
+          detail: 'Your test is now being evaluated by AI. Check your history for results.', 
+          currentItem: 0, 
+          totalItems: 0 
+        });
 
         // Delete persisted audio (uploaded successfully)
         if (testId) await deleteAudioSegments(testId);
@@ -1673,6 +1722,8 @@ export default function AIPracticeSpeakingTest() {
               setIsMuted={setIsMuted}
               audioRef={presetAudioRef}
               isPlaying={!!currentSpeakingText}
+              onTTSVolumeChange={tts.setVolume}
+              onTTSMutedChange={tts.setMuted}
             />
           </div>
         </div>
@@ -1811,22 +1862,81 @@ export default function AIPracticeSpeakingTest() {
           </div>
         )}
 
-        {/* Submitting state - Full screen AILoadingScreen */}
+        {/* Submitting state - Full screen with detailed progress */}
         {phase === 'submitting' && (
-          <AILoadingScreen
-            title="Evaluating Your Speaking Test"
-            description="AI is analyzing your responses"
-            progressSteps={[
-              'Preparing audio',
-              'Waiting for part evaluations',
-              'Processing recordings',
-              'Generating feedback',
-              'Finalizing results',
-            ]}
-            currentStepIndex={evaluationStep}
-            estimatedTime="30-60 seconds"
-            estimatedSeconds={45}
-          />
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/95 backdrop-blur-sm">
+            <div className="flex flex-col items-center gap-6 p-8 max-w-md text-center">
+              {/* Animated spinner */}
+              <div className="relative">
+                <Loader2 className="w-16 h-16 text-primary animate-spin" />
+                {submissionProgress.totalItems > 0 && (
+                  <div className="absolute inset-0 flex items-center justify-center">
+                    <span className="text-sm font-semibold">
+                      {submissionProgress.currentItem}/{submissionProgress.totalItems}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* Main step indicator */}
+              <div className="space-y-2">
+                <h2 className="text-xl font-semibold">{submissionProgress.step || 'Processing...'}</h2>
+                <p className="text-sm text-muted-foreground">{submissionProgress.detail}</p>
+              </div>
+
+              {/* Progress bar for uploads */}
+              {submissionProgress.totalItems > 0 && (
+                <div className="w-full space-y-2">
+                  <Progress 
+                    value={(submissionProgress.currentItem / submissionProgress.totalItems) * 100} 
+                    className="h-2"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {submissionProgress.currentItem} of {submissionProgress.totalItems} files processed
+                  </p>
+                </div>
+              )}
+
+              {/* Step indicators */}
+              <div className="flex flex-col gap-2 w-full mt-4">
+                {[
+                  { step: 1, label: 'Preparing recordings', icon: '🎙️' },
+                  { step: 2, label: 'Uploading audio files', icon: '☁️' },
+                  { step: 3, label: 'Queuing for evaluation', icon: '🤖' },
+                  { step: 4, label: 'Complete!', icon: '✅' },
+                ].map(({ step, label, icon }) => (
+                  <div 
+                    key={step}
+                    className={cn(
+                      "flex items-center gap-3 px-4 py-2 rounded-lg transition-all",
+                      evaluationStep >= step 
+                        ? "bg-primary/10 text-primary" 
+                        : "bg-muted/50 text-muted-foreground"
+                    )}
+                  >
+                    <span className="text-lg">{icon}</span>
+                    <span className={cn(
+                      "text-sm",
+                      evaluationStep >= step ? "font-medium" : ""
+                    )}>
+                      {label}
+                    </span>
+                    {evaluationStep === step && step < 4 && (
+                      <Loader2 className="w-4 h-4 ml-auto animate-spin" />
+                    )}
+                    {evaluationStep > step && (
+                      <span className="ml-auto text-green-500">✓</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              {/* Encouraging message */}
+              <p className="text-xs text-muted-foreground mt-4">
+                Please wait while we process your speaking test. This usually takes 30-60 seconds.
+              </p>
+            </div>
+          </div>
         )}
 
         {/* Progress indicator - Fixed bottom bar (matching Cambridge style) */}
