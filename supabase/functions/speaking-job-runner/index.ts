@@ -120,9 +120,9 @@ serve(async (req) => {
     // This is a safety net - jobs should normally be triggered directly by the previous stage
     let pendingQuery = supabaseService
       .from('speaking_evaluation_jobs')
-      .select('id, stage, google_file_uris, created_at')
+      .select('id, stage, google_file_uris, created_at, partial_results')
       .eq('status', 'pending')
-      .in('stage', ['pending_upload', 'pending_eval'])
+      .in('stage', ['pending_upload', 'pending_eval', 'pending_text_eval'])
       .order('created_at', { ascending: true });
 
     if (specificJobId) {
@@ -138,10 +138,13 @@ serve(async (req) => {
 
       for (const job of pendingJobs) {
         try {
-          // Determine which function to call
+          // Determine which function to call based on stage
           let functionName: string;
           
-          if (job.stage === 'pending_upload') {
+          if (job.stage === 'pending_text_eval') {
+            // Text-based evaluation (browser transcripts available) - use process-speaking-job
+            functionName = 'process-speaking-job';
+          } else if (job.stage === 'pending_upload') {
             // Check if uploads already exist (idempotency)
             if (job.google_file_uris && Object.keys(job.google_file_uris).length > 0) {
               // Uploads exist, advance to eval stage
