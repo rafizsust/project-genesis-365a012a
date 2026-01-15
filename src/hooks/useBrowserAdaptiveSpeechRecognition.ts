@@ -213,7 +213,8 @@ export function useBrowserAdaptiveSpeechRecognition(
     return recognition;
   }, [browser, selectedAccent]);
 
-  // ==================== CORE: Safe restart (via ref to break circular deps) ====================
+  // ==================== CORE: Safe restart (watchdog-triggered only) ====================
+  // This only STOPS the recognition - onend handler will restart it
   const safeRestartRef = useRef<() => void>(() => {});
   
   const safeRestart = useCallback(() => {
@@ -228,44 +229,40 @@ export function useBrowserAdaptiveSpeechRecognition(
     }
     
     isRestartingRef.current = true;
-    console.log('[SpeechRecognition] Performing safe restart...');
+    console.log('[SpeechRecognition] Performing safe restart (stop only, onend will restart)...');
     
-    // Stop current instance gracefully
+    // Stop current instance gracefully - onend will handle restart
     if (recognitionRef.current) {
       try {
         recognitionRef.current.stop();
       } catch {
-        // Already stopped
+        // Already stopped - manually trigger restart logic
+        console.log('[SpeechRecognition] Already stopped, triggering manual restart');
+        const delay = browser.isEdge ? 300 : RESTART_DELAY_MS;
+        
+        setTimeout(() => {
+          if (!isRecordingRef.current || isManualStopRef.current) {
+            isRestartingRef.current = false;
+            return;
+          }
+          
+          isRestartingRef.current = false;
+          sessionStartRef.current = Date.now();
+          
+          if (recognitionRef.current) {
+            try {
+              recognitionRef.current.start();
+              console.log('[SpeechRecognition] Restarted successfully');
+              transientRetryCountRef.current = 0;
+            } catch (err) {
+              console.error('[SpeechRecognition] Restart failed:', err);
+              consecutiveFailuresRef.current++;
+            }
+          }
+        }, delay);
       }
     }
-    
-    // Restart after delay
-    setTimeout(() => {
-      if (!isRecordingRef.current || isManualStopRef.current) {
-        isRestartingRef.current = false;
-        return;
-      }
-      
-      // Reset session start for next cycle
-      sessionStartRef.current = Date.now();
-      isRestartingRef.current = false;
-      
-      if (recognitionRef.current) {
-        try {
-          recognitionRef.current.start();
-          console.log('[SpeechRecognition] Restarted successfully');
-          transientRetryCountRef.current = 0;
-        } catch (err) {
-          console.error('[SpeechRecognition] Restart failed:', err);
-          consecutiveFailuresRef.current++;
-          
-          if (consecutiveFailuresRef.current >= MAX_CONSECUTIVE_FAILURES) {
-            setError(new Error('Speech recognition failed to restart after multiple attempts'));
-          }
-        }
-      }
-    }, RESTART_DELAY_MS);
-  }, []);
+  }, [browser.isEdge]);
   
   // Keep ref in sync
   useEffect(() => {
@@ -401,15 +398,62 @@ export function useBrowserAdaptiveSpeechRecognition(
       return;
     }
     
-    // If we're in the middle of a planned restart cycle, let safeRestart handle it
+    // If we're in the middle of a planned restart cycle, handle the delayed restart
     if (isRestartingRef.current) {
+      // Edge-specific: wait for late results before restarting
+      const delay = browser.isEdge ? 300 : RESTART_DELAY_MS;
+      
+      setTimeout(() => {
+        if (!isRecordingRef.current || isManualStopRef.current) {
+          isRestartingRef.current = false;
+          return;
+        }
+        
+        isRestartingRef.current = false;
+        sessionStartRef.current = Date.now();
+        
+        if (recognitionRef.current) {
+          try {
+            recognitionRef.current.start();
+            console.log('[SpeechRecognition] Restarted after controlled cycle');
+            transientRetryCountRef.current = 0;
+          } catch (err) {
+            console.error('[SpeechRecognition] Restart failed:', err);
+            consecutiveFailuresRef.current++;
+          }
+        }
+      }, delay);
       return;
     }
     
-    // Unexpected end - browser cutoff - restart immediately
-    console.log('[SpeechRecognition] Unexpected end detected, restarting...');
-    safeRestartRef.current();
-  }, []);
+    // Unexpected end - browser cutoff - restart with delay
+    console.log('[SpeechRecognition] Unexpected end detected, scheduling restart...');
+    isRestartingRef.current = true;
+    
+    // Edge-specific: wait for late results
+    const delay = browser.isEdge ? 300 : RESTART_DELAY_MS;
+    
+    setTimeout(() => {
+      if (!isRecordingRef.current || isManualStopRef.current) {
+        isRestartingRef.current = false;
+        return;
+      }
+      
+      isRestartingRef.current = false;
+      sessionStartRef.current = Date.now();
+      
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.start();
+          console.log('[SpeechRecognition] Restarted after unexpected end');
+          transientRetryCountRef.current = 0;
+        } catch (err) {
+          console.error('[SpeechRecognition] Restart failed:', err);
+          consecutiveFailuresRef.current++;
+        }
+      }
+    }, delay);
+  }, [browser.isEdge]);
 
   // ==================== HANDLER: onstart ====================
   const handleStart = useCallback(() => {
