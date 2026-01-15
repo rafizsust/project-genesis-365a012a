@@ -2076,19 +2076,7 @@ export default function AIPracticeSpeakingTest() {
           </div>
         )}
 
-        {/* Live transcript during recording */}
-        {isRecording && speechAnalysis.interimTranscript && (
-          <Card className="mb-4 md:mb-6 border-muted bg-muted/30">
-            <CardContent className="p-3 md:p-4">
-              <div className="flex items-start gap-2 md:gap-3">
-                <Mic className="w-4 h-4 md:w-5 md:h-5 text-primary mt-1 animate-pulse flex-shrink-0" />
-                <p className="text-sm md:text-base text-muted-foreground italic">
-                  {speechAnalysis.interimTranscript || 'Listening...'}
-                </p>
-              </div>
-            </CardContent>
-          </Card>
-        )}
+        {/* Live transcript removed - will only show in evaluation report */}
 
         {/* Part 2 - Start Speaking Early Button */}
         {phase === 'part2_prep' && (

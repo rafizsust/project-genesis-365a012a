@@ -618,11 +618,12 @@ async function processTextBasedEvaluation(job: any, supabaseService: any, appEnc
         const errMsg = String(err?.message || '');
         console.error(`[processTextBasedEvaluation] ${modelName} error:`, errMsg.slice(0, 200));
 
-        if (isDailyQuotaExhaustedError(err)) {
+        if (isDailyQuotaExhaustedError(err) || isQuotaExhaustedError(errMsg)) {
           if (!candidateKey.isUserProvided && candidateKey.keyId) {
             await markModelQuotaExhausted(supabaseService, candidateKey.keyId, modelName);
           }
-          break;
+          // Continue to try next model instead of breaking
+          continue;
         }
       }
     }
