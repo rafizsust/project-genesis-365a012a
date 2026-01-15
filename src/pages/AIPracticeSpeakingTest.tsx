@@ -577,18 +577,17 @@ export default function AIPracticeSpeakingTest() {
         
         // Show "Analyzing..." state briefly to indicate processing
         setIsAnalyzingFeedback(true);
-        
-        // Random delay between 1-2 seconds for natural feel
+
+        // IMPORTANT: Persist analysis immediately so submission always includes transcripts/confidence
+        setSegmentAnalyses(prev => ({
+          ...prev,
+          [key]: analysis,
+        }));
+
+        // Keep the short delay purely for UI feel
         const analysisDelay = 1000 + Math.random() * 1000;
-        
         setTimeout(() => {
-          setSegmentAnalyses(prev => ({
-            ...prev,
-            [key]: analysis,
-          }));
           setIsAnalyzingFeedback(false);
-          // Note: Confidence scores are now integrated into evaluation report only
-          // No instant feedback display - user will see results in the evaluation page
         }, analysisDelay);
       }
     }

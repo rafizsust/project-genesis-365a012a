@@ -673,6 +673,7 @@ async function processTextBasedEvaluation(job: any, supabaseService: any, appEnc
         audio_urls: audioUrls,
         transcripts,  // Include the rich transcript data
         transcripts_by_part: evaluationResult?.transcripts_by_part || {},
+        transcripts_by_question: evaluationResult?.transcripts_by_question || {},
         file_paths,
       },
       completed_at: new Date().toISOString(),
