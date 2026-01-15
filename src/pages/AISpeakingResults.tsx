@@ -205,7 +205,25 @@ function normalizeEvaluationReport(raw: any): EvaluationReport {
     });
   })();
 
-  const modelAnswers = asArray<ModelAnswer>(raw?.modelAnswers ?? raw?.model_answers);
+  const modelAnswers = asArray<any>(raw?.modelAnswers ?? raw?.model_answers ?? raw?.model_answers_by_question).map((m: any) => ({
+    // Keep whatever the backend gave us, but normalize common key variants so UI never blanks.
+    ...m,
+    segment_key: String(m?.segment_key ?? m?.segmentKey ?? ''),
+    partNumber: toNumber(m?.partNumber ?? m?.part_number, 0),
+    questionNumber: toNumber(m?.questionNumber ?? m?.question_number, 0),
+    question: String(m?.question ?? m?.question_text ?? ''),
+    candidateResponse: String(m?.candidateResponse ?? m?.candidate_response ?? m?.transcript ?? ''),
+    estimatedBand: typeof m?.estimatedBand === 'number' ? m.estimatedBand : (typeof m?.estimated_band === 'number' ? m.estimated_band : undefined),
+    targetBand: typeof m?.targetBand === 'number' ? m.targetBand : (typeof m?.target_band === 'number' ? m.target_band : undefined),
+    modelAnswer: String(m?.modelAnswer ?? m?.model_answer ?? ''),
+    whyItWorks: Array.isArray(m?.whyItWorks) ? m.whyItWorks : (Array.isArray(m?.why_it_works) ? m.why_it_works : undefined),
+    keyImprovements: Array.isArray(m?.keyImprovements) ? m.keyImprovements : (Array.isArray(m?.key_improvements) ? m.key_improvements : undefined),
+    // Legacy support (if Gemini returns these)
+    modelAnswerBand6: m?.modelAnswerBand6 ?? m?.model_answer_band6,
+    modelAnswerBand7: m?.modelAnswerBand7 ?? m?.model_answer_band7,
+    modelAnswerBand8: m?.modelAnswerBand8 ?? m?.model_answer_band8,
+    modelAnswerBand9: m?.modelAnswerBand9 ?? m?.model_answer_band9,
+  })) as ModelAnswer[];
 
   // Handle strengths from multiple possible sources
   const strengthsToMaintain = (() => {
@@ -569,6 +587,10 @@ export default function AISpeakingResults() {
       }
     }
 
+    const confidenceTranscripts = (data.answers && typeof data.answers === 'object')
+      ? ((data.answers as any).transcripts as Record<string, any> | undefined)
+      : undefined;
+
     setResult({
       id: data.id,
       test_id: data.test_id,
@@ -579,6 +601,7 @@ export default function AISpeakingResults() {
         by_part: transcriptsByPart,
         by_question: transcriptsByQuestion,
       },
+      confidence_transcripts: confidenceTranscripts,
       created_at: data.completed_at,
     });
     setLoading(false);
@@ -915,25 +938,7 @@ export default function AISpeakingResults() {
 
             {/* Confidence Analysis Tab - Word Confidence & Fluency Metrics */}
             <TabsContent value="confidence" className="mt-4 md:mt-6">
-              <ConfidenceAnalysisTab 
-                transcripts={(() => {
-                  // Try multiple paths to find transcripts data with word confidences
-                  const answers = (result as any)?.answers || (result as any);
-                  
-                  // Primary path: answers.transcripts (from text-based evaluation)
-                  if (answers?.transcripts && typeof answers.transcripts === 'object') {
-                    return answers.transcripts;
-                  }
-                  
-                  // Fallback: Check if transcripts are stored directly on result
-                  const directTranscripts = (result as any)?.transcripts;
-                  if (directTranscripts && typeof directTranscripts === 'object') {
-                    return directTranscripts;
-                  }
-                  
-                  return undefined;
-                })()} 
-              />
+              <ConfidenceAnalysisTab transcripts={(result as any)?.confidence_transcripts} />
             </TabsContent>
 
             {/* Candidate Transcript with Audio Playback */}
