@@ -30,12 +30,22 @@ export class AudioFeatureExtractor {
   private intervalId: number | null = null;
   private isRecording: boolean = false;
 
+  // Pitch smoothing buffer for stable readings
+  private pitchBuffer: number[] = [];
+  private readonly PITCH_BUFFER_SIZE = 5;
+
   private readonly FRAME_INTERVAL_MS = 100; // Capture every 100ms
   private readonly SILENCE_THRESHOLD = 0.02;
   private readonly FFT_SIZE = 2048;
 
   async start(stream: MediaStream): Promise<void> {
     this.audioContext = new AudioContext();
+    
+    // Fix AudioContext suspension (required on some mobile browsers)
+    if (this.audioContext.state === 'suspended') {
+      await this.audioContext.resume();
+    }
+    
     this.analyser = this.audioContext.createAnalyser();
     this.analyser.fftSize = this.FFT_SIZE;
 
@@ -43,6 +53,7 @@ export class AudioFeatureExtractor {
     this.source.connect(this.analyser);
 
     this.frames = [];
+    this.pitchBuffer = [];
     this.startTime = Date.now();
     this.isRecording = true;
 
@@ -52,6 +63,22 @@ export class AudioFeatureExtractor {
         this.captureFrame();
       }
     }, this.FRAME_INTERVAL_MS);
+  }
+
+  // Get smoothed pitch using moving average
+  private getSmoothedPitch(rawPitch: number): number {
+    if (rawPitch > 0) {
+      this.pitchBuffer.push(rawPitch);
+      if (this.pitchBuffer.length > this.PITCH_BUFFER_SIZE) {
+        this.pitchBuffer.shift();
+      }
+    }
+    
+    if (this.pitchBuffer.length === 0) return 0;
+    
+    // Return average of buffer
+    const sum = this.pitchBuffer.reduce((a, b) => a + b, 0);
+    return sum / this.pitchBuffer.length;
   }
 
   private captureFrame(): void {
@@ -94,12 +121,15 @@ export class AudioFeatureExtractor {
     const spectralCentroid = denominator > 0 ? numerator / denominator : 0;
 
     const isSilent = rms < this.SILENCE_THRESHOLD;
+    
+    // Apply pitch smoothing to prevent jittery graphs
+    const smoothedPitch = isSilent ? 0 : this.getSmoothedPitch(pitch);
 
     this.frames.push({
       timestamp: Date.now() - this.startTime,
       rms,
       zcr,
-      pitch: isSilent ? 0 : pitch,
+      pitch: smoothedPitch,
       spectralCentroid,
       isSilent,
     });
@@ -131,6 +161,11 @@ export class AudioFeatureExtractor {
     return bestLag > 0 ? sampleRate / bestLag : 0;
   }
 
+  // Get recent frames for real-time monitoring
+  getRecentFrames(count: number): AudioFeatureFrame[] {
+    return this.frames.slice(-count);
+  }
+
   stop(): AudioAnalysisResult {
     this.isRecording = false;
 
@@ -148,6 +183,9 @@ export class AudioFeatureExtractor {
         // Ignore close errors
       });
     }
+
+    // Clear pitch buffer
+    this.pitchBuffer = [];
 
     // Calculate aggregate metrics
     const nonSilentFrames = this.frames.filter(f => !f.isSilent);

@@ -76,6 +76,7 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
   const [interimTranscript, setInterimTranscript] = useState('');
   const [error, setError] = useState<Error | null>(null);
   const [isSupported, setIsSupported] = useState(true);
+  const [currentRms, setCurrentRms] = useState(0); // Real-time volume for monitoring
 
   const audioExtractorRef = useRef<AudioFeatureExtractor | null>(null);
   const wordTrackerRef = useRef<WordConfidenceTracker | null>(null);
@@ -83,6 +84,8 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
   const finalTranscriptRef = useRef('');
   const startTimeRef = useRef(0);
   const isAnalyzingRef = useRef(false);
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
+  const rmsMonitorRef = useRef<number | null>(null);
 
   const start = useCallback(async (stream: MediaStream) => {
     // Check browser support
@@ -97,12 +100,32 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
     setIsAnalyzing(true);
     isAnalyzingRef.current = true;
     setInterimTranscript('');
+    setCurrentRms(0);
     finalTranscriptRef.current = '';
     startTimeRef.current = Date.now();
+
+    // Request screen wake lock to prevent phone sleep during long recordings
+    try {
+      if ('wakeLock' in navigator) {
+        wakeLockRef.current = await navigator.wakeLock.request('screen');
+        console.log('[SpeechAnalysis] Wake lock acquired');
+      }
+    } catch (err) {
+      console.warn('[SpeechAnalysis] Wake lock not available:', err);
+    }
 
     // Start audio feature extraction
     audioExtractorRef.current = new AudioFeatureExtractor();
     await audioExtractorRef.current.start(stream);
+
+    // Start RMS monitoring for real-time volume feedback
+    rmsMonitorRef.current = window.setInterval(() => {
+      const frames = audioExtractorRef.current?.getRecentFrames?.(5) || [];
+      if (frames.length > 0) {
+        const avgRms = frames.reduce((sum, f) => sum + f.rms, 0) / frames.length;
+        setCurrentRms(avgRms);
+      }
+    }, 200);
 
     // Start word confidence tracking
     wordTrackerRef.current = new WordConfidenceTracker();
@@ -148,11 +171,16 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
       }
     };
 
+    // Speech Watchdog: Auto-restart recognition if it stops during silence
     recognition.onend = () => {
-      // Auto-restart if still analyzing
       if (isAnalyzingRef.current && recognitionRef.current) {
+        console.log('[SpeechAnalysis] Recognition ended, restarting watchdog...');
         try {
-          recognition.start();
+          setTimeout(() => {
+            if (isAnalyzingRef.current && recognitionRef.current) {
+              recognition.start();
+            }
+          }, 100);
         } catch {
           // Already started or stopped
         }
@@ -173,6 +201,20 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
   const stop = useCallback((): SpeechAnalysisResult | null => {
     setIsAnalyzing(false);
     isAnalyzingRef.current = false;
+    setCurrentRms(0);
+
+    // Stop RMS monitor
+    if (rmsMonitorRef.current) {
+      clearInterval(rmsMonitorRef.current);
+      rmsMonitorRef.current = null;
+    }
+
+    // Release wake lock
+    if (wakeLockRef.current) {
+      wakeLockRef.current.release().catch(() => {});
+      wakeLockRef.current = null;
+      console.log('[SpeechAnalysis] Wake lock released');
+    }
 
     // Stop speech recognition
     if (recognitionRef.current) {
@@ -191,6 +233,13 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
 
     // Get final transcript
     const rawTranscript = (finalTranscriptRef.current.trim() || interimTranscript.trim());
+
+    // Silence Safety Gate: If audio is silent but text exists (hallucination), discard
+    const isSilentAudio = audioAnalysis.silenceRatio > 0.95 && audioAnalysis.averageRms < 0.01;
+    if (isSilentAudio && rawTranscript.length > 0) {
+      console.warn('[SpeechAnalysis] Silent audio with text detected - possible hallucination, discarding');
+      return null;
+    }
 
     if (!rawTranscript) {
       return null;
@@ -246,6 +295,19 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
   const abort = useCallback(() => {
     setIsAnalyzing(false);
     isAnalyzingRef.current = false;
+    setCurrentRms(0);
+
+    // Stop RMS monitor
+    if (rmsMonitorRef.current) {
+      clearInterval(rmsMonitorRef.current);
+      rmsMonitorRef.current = null;
+    }
+
+    // Release wake lock
+    if (wakeLockRef.current) {
+      wakeLockRef.current.release().catch(() => {});
+      wakeLockRef.current = null;
+    }
 
     if (recognitionRef.current) {
       try {
@@ -269,6 +331,7 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
     isAnalyzing,
     isSupported,
     interimTranscript,
+    currentRms,
     error,
     start,
     stop,

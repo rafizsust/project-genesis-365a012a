@@ -172,6 +172,8 @@ export default function AIPracticeSpeakingTest() {
   const [segmentAnalyses, setSegmentAnalyses] = useState<Record<string, SpeechAnalysisResult>>({});
   const [currentAnalysis, setCurrentAnalysis] = useState<SpeechAnalysisResult | null>(null);
   const [showInstantFeedback, setShowInstantFeedback] = useState(false);
+  const [isAnalyzingFeedback, setIsAnalyzingFeedback] = useState(false); // Show "Analyzing..." state
+  const [showLowVolumeWarning, setShowLowVolumeWarning] = useState(false); // Real-time volume warning
 
   // Advanced speech analysis hook
   const speechAnalysis = useAdvancedSpeechAnalysis({
@@ -181,6 +183,75 @@ export default function AIPracticeSpeakingTest() {
       console.log('[SpeakingTest] Live transcript:', transcript.slice(-50));
     },
   });
+
+  // Track low volume duration for warning
+  const lowVolumeStartRef = useRef<number | null>(null);
+  const LOW_VOLUME_THRESHOLD = 0.015;
+  const LOW_VOLUME_DURATION_MS = 3000;
+
+  // Monitor volume during recording for low volume warning
+  useEffect(() => {
+    if (!isRecording) {
+      setShowLowVolumeWarning(false);
+      lowVolumeStartRef.current = null;
+      return;
+    }
+
+    const rms = speechAnalysis.currentRms;
+    
+    if (rms < LOW_VOLUME_THRESHOLD && rms > 0) {
+      if (lowVolumeStartRef.current === null) {
+        lowVolumeStartRef.current = Date.now();
+      } else if (Date.now() - lowVolumeStartRef.current > LOW_VOLUME_DURATION_MS) {
+        setShowLowVolumeWarning(true);
+      }
+    } else {
+      lowVolumeStartRef.current = null;
+      setShowLowVolumeWarning(false);
+    }
+  }, [isRecording, speechAnalysis.currentRms]);
+
+  // Persist segment analyses to sessionStorage for crash recovery
+  const SEGMENT_ANALYSES_KEY = `speaking_analyses_${testId}`;
+  
+  useEffect(() => {
+    if (Object.keys(segmentAnalyses).length > 0 && testId) {
+      try {
+        // Store only essential data (exclude large audio analysis frames)
+        const serializableAnalyses: Record<string, any> = {};
+        for (const [key, analysis] of Object.entries(segmentAnalyses)) {
+          serializableAnalyses[key] = {
+            rawTranscript: analysis.rawTranscript,
+            cleanedTranscript: analysis.cleanedTranscript,
+            wordConfidences: analysis.wordConfidences,
+            fluencyMetrics: analysis.fluencyMetrics,
+            prosodyMetrics: analysis.prosodyMetrics,
+            durationMs: analysis.durationMs,
+            overallClarityScore: analysis.overallClarityScore,
+            // Exclude audioAnalysis.frames to save space
+          };
+        }
+        sessionStorage.setItem(SEGMENT_ANALYSES_KEY, JSON.stringify(serializableAnalyses));
+      } catch (e) {
+        console.warn('[SpeakingTest] Failed to persist segment analyses:', e);
+      }
+    }
+  }, [segmentAnalyses, testId]);
+
+  // Restore segment analyses from sessionStorage on load
+  useEffect(() => {
+    if (!testId) return;
+    try {
+      const saved = sessionStorage.getItem(SEGMENT_ANALYSES_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        console.log('[SpeakingTest] Restored segment analyses from session:', Object.keys(parsed));
+        setSegmentAnalyses(parsed);
+      }
+    } catch (e) {
+      console.warn('[SpeakingTest] Failed to restore segment analyses:', e);
+    }
+  }, [testId]);
 
   // Refs for state access in callbacks (avoid stale closures)
   const phaseRef = useRef<TestPhase>(phase);
@@ -487,21 +558,42 @@ export default function AIPracticeSpeakingTest() {
     // Stop speech analysis and capture results
     if (speechAnalysis.isAnalyzing) {
       const analysis = speechAnalysis.stop();
-      if (analysis && key) {
+      
+      // Silence Safety Gate: If analysis is null (silent audio with possible hallucination), 
+      // prompt user to record again
+      if (!analysis) {
+        console.warn(`[SpeakingTest] Silent/invalid recording for ${key} - discarding`);
+        toast({
+          title: 'Recording Issue',
+          description: 'No speech was detected. Please try recording again.',
+          variant: 'destructive',
+        });
+      } else if (key) {
         console.log(`[SpeakingTest] Speech analysis for ${key}:`, {
           rawTranscript: analysis.rawTranscript.slice(0, 100),
           wordCount: analysis.wordConfidences.length,
           fluencyScore: analysis.fluencyMetrics.overallFluencyScore,
           clarityScore: analysis.overallClarityScore,
         });
-        setSegmentAnalyses(prev => ({
-          ...prev,
-          [key]: analysis,
-        }));
-        setCurrentAnalysis(analysis);
-        // Show instant feedback for a few seconds
-        setShowInstantFeedback(true);
-        setTimeout(() => setShowInstantFeedback(false), 5000);
+        
+        // Show "Analyzing..." state for 3-4 seconds to make score feel calculated
+        setIsAnalyzingFeedback(true);
+        setShowInstantFeedback(false);
+        
+        // Random delay between 3-4 seconds for natural feel
+        const analysisDelay = 3000 + Math.random() * 1000;
+        
+        setTimeout(() => {
+          setSegmentAnalyses(prev => ({
+            ...prev,
+            [key]: analysis,
+          }));
+          setCurrentAnalysis(analysis);
+          setIsAnalyzingFeedback(false);
+          setShowInstantFeedback(true);
+          // Auto-hide after 5 seconds
+          setTimeout(() => setShowInstantFeedback(false), 5000);
+        }, analysisDelay);
       }
     }
 
@@ -1961,13 +2053,38 @@ export default function AIPracticeSpeakingTest() {
           </div>
         )}
 
+        {/* Analyzing feedback state - shown during analysis delay */}
+        {isAnalyzingFeedback && !isRecording && (
+          <div className="mb-4 md:mb-6 animate-in fade-in duration-300">
+            <Card className="border-primary/30 bg-primary/5">
+              <CardContent className="p-4 md:p-6 flex items-center justify-center gap-3">
+                <Loader2 className="w-5 h-5 text-primary animate-spin" />
+                <span className="text-base font-medium text-primary">Analyzing your response...</span>
+              </CardContent>
+            </Card>
+          </div>
+        )}
+
         {/* Instant Speech Feedback - shown briefly after recording stops */}
-        {showInstantFeedback && currentAnalysis && !isRecording && (
+        {showInstantFeedback && currentAnalysis && !isRecording && !isAnalyzingFeedback && (
           <div className="mb-4 md:mb-6 animate-in fade-in slide-in-from-bottom-4 duration-300">
             <InstantSpeechFeedback 
               analysis={currentAnalysis} 
               showDisclaimer={true}
             />
+          </div>
+        )}
+
+        {/* Low Volume Warning - shown during recording when mic input is low */}
+        {isRecording && showLowVolumeWarning && (
+          <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-40 animate-in fade-in slide-in-from-bottom-2 duration-200">
+            <Badge 
+              variant="destructive" 
+              className="py-2 px-4 text-sm font-medium shadow-lg flex items-center gap-2"
+            >
+              <Mic className="w-4 h-4" />
+              Microphone input low - Speak up!
+            </Badge>
           </div>
         )}
 
