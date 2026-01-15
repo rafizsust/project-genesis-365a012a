@@ -237,8 +237,8 @@ function normalizeEvaluationReport(raw: any): EvaluationReport {
   };
 }
 
-// Instant Analysis Tab Component - displays word confidence and fluency metrics
-interface InstantTranscriptData {
+// Confidence Analysis Tab Component - displays word confidence and fluency metrics
+interface ConfidenceTranscriptData {
   rawTranscript?: string;
   cleanedTranscript?: string;
   wordConfidences?: Array<{ word: string; confidence: number; isFiller?: boolean; isRepeat?: boolean }>;
@@ -257,17 +257,17 @@ interface InstantTranscriptData {
   overallClarityScore?: number;
 }
 
-function InstantAnalysisTab({ transcripts }: { transcripts?: Record<string, InstantTranscriptData> }) {
+function ConfidenceAnalysisTab({ transcripts }: { transcripts?: Record<string, ConfidenceTranscriptData> }) {
   if (!transcripts || Object.keys(transcripts).length === 0) {
     return (
       <Card>
         <CardContent className="py-8 text-center">
           <AlertCircle className="w-8 h-8 mx-auto mb-3 text-muted-foreground" />
           <p className="text-muted-foreground">
-            Instant analysis data is not available for this test.
+            Word confidence data is not available for this test.
           </p>
           <p className="text-xs text-muted-foreground mt-2">
-            This feature requires browser-based speech recognition during the test.
+            This feature requires browser-based speech recognition during the test which captures per-word confidence scores.
           </p>
         </CardContent>
       </Card>
@@ -292,11 +292,11 @@ function InstantAnalysisTab({ transcripts }: { transcripts?: Record<string, Inst
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
-            <Sparkles className="w-5 h-5 text-primary" />
-            Instant Speech Analysis
+            <Target className="w-5 h-5 text-primary" />
+            Word Confidence Analysis
           </CardTitle>
           <CardDescription>
-            Real-time word confidence and fluency metrics captured during your test
+            Per-word confidence scores and fluency metrics captured during your test
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
@@ -832,7 +832,7 @@ export default function AISpeakingResults() {
             <TabsList className="w-full overflow-x-auto flex md:grid md:grid-cols-7 h-auto p-1">
               <TabsTrigger value="criteria" className="text-xs md:text-sm px-2 md:px-3 py-1.5 whitespace-nowrap">Criteria</TabsTrigger>
               <TabsTrigger value="transcript" className="text-xs md:text-sm px-2 md:px-3 py-1.5 whitespace-nowrap">Transcript</TabsTrigger>
-              <TabsTrigger value="instant" className="text-xs md:text-sm px-2 md:px-3 py-1.5 whitespace-nowrap">Instant</TabsTrigger>
+              <TabsTrigger value="confidence" className="text-xs md:text-sm px-2 md:px-3 py-1.5 whitespace-nowrap">Confidence</TabsTrigger>
               <TabsTrigger value="model" className="text-xs md:text-sm px-2 md:px-3 py-1.5 whitespace-nowrap">Model</TabsTrigger>
               <TabsTrigger value="lexical" className="text-xs md:text-sm px-2 md:px-3 py-1.5 whitespace-nowrap">Lexical</TabsTrigger>
               <TabsTrigger value="parts" className="text-xs md:text-sm px-2 md:px-3 py-1.5 whitespace-nowrap">Parts</TabsTrigger>
@@ -913,9 +913,9 @@ export default function AISpeakingResults() {
               />
             </TabsContent>
 
-            {/* Instant Analysis Tab - Word Confidence & Fluency Metrics */}
-            <TabsContent value="instant" className="mt-4 md:mt-6">
-              <InstantAnalysisTab 
+            {/* Confidence Analysis Tab - Word Confidence & Fluency Metrics */}
+            <TabsContent value="confidence" className="mt-4 md:mt-6">
+              <ConfidenceAnalysisTab 
                 transcripts={(result as any)?.answers?.transcripts} 
               />
             </TabsContent>

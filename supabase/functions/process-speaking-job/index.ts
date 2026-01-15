@@ -28,7 +28,7 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
-const GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash'];
+const GEMINI_MODELS = ['gemini-2.5-flash']; // Removed gemini-2.0-flash due to persistent rate limiting
 
 class QuotaError extends Error {
   permanent: boolean;
@@ -575,7 +575,7 @@ async function processTextBasedEvaluation(job: any, supabaseService: any, appEnc
     }
   }
 
-  const TEXT_MODELS = ['gemini-2.0-flash', 'gemini-2.5-flash'];
+  const TEXT_MODELS = ['gemini-2.5-flash']; // Removed gemini-2.0-flash due to persistent rate limiting
   const dbApiKeys = await getActiveGeminiKeysForModels(supabaseService, TEXT_MODELS);
   for (const dbKey of dbApiKeys) {
     keyQueue.push({ key: dbKey.key_value, keyId: dbKey.id, isUserProvided: false });
