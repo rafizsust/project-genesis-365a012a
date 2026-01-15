@@ -5,7 +5,9 @@
  * Edge and Chrome are treated as DIFFERENT speech engines.
  * 
  * - Edge: Natural mode, no forced language, preserves fillers
- * - Chrome: Forced accent for stability, ghost word tracking enabled
+ * - Chrome: Forced accent for stability, ghost word tracking, seamless overlap cycling
+ * 
+ * KEY FIX: Uses OVERLAPPING recognition instances to eliminate gaps during cycling/restarts
  */
 
 import { useState, useRef, useCallback, useEffect } from 'react';
@@ -46,6 +48,18 @@ interface UseSpeechRecognitionReturn {
   setAccent: (accent: string) => void;
 }
 
+// CRITICAL: Chrome cycle interval BEFORE Chrome's ~45-second cutoff
+const CHROME_CYCLE_INTERVAL_MS = 35000;
+
+// Edge cycle interval - Edge has longer tolerance but still needs cycling
+const EDGE_CYCLE_INTERVAL_MS = 55000;
+
+// Overlap duration: how long both instances run together during transition
+const OVERLAP_DURATION_MS = 3000;
+
+// Maximum consecutive restart failures
+const MAX_CONSECUTIVE_FAILURES = 10;
+
 export function useBrowserAdaptiveSpeechRecognition(
   config: SpeechRecognitionConfig = {}
 ): UseSpeechRecognitionReturn {
@@ -64,17 +78,22 @@ export function useBrowserAdaptiveSpeechRecognition(
   const [sessionDuration, setSessionDuration] = useState(0);
   const [selectedAccent, setSelectedAccent] = useState(() => config.accent || getStoredAccent());
   
-  const recognitionRef = useRef<SpeechRecognitionType | null>(null);
+  // DUAL RECOGNITION INSTANCES for seamless overlap transitions
+  const primaryRecognitionRef = useRef<SpeechRecognitionType | null>(null);
+  const secondaryRecognitionRef = useRef<SpeechRecognitionType | null>(null);
+  const activeInstanceRef = useRef<'primary' | 'secondary'>('primary');
+  
   const isManualStopRef = useRef(false);
-  const restartAttemptRef = useRef(0);
-  const lastProcessedIndexRef = useRef(-1);
-  const lastFinalTextRef = useRef('');
+  const isListeningRef = useRef(false);
   const wordIdCounterRef = useRef(0);
   const sessionStartTimeRef = useRef(0);
-  const chromeCycleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cycleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pauseTrackerRef = useRef(new PauseTracker());
   const ghostTrackerRef = useRef(new GhostWordTracker());
+  const consecutiveFailuresRef = useRef(0);
+  const lastProcessedTextRef = useRef(new Set<string>());
+  const lastFinalTextRef = useRef('');
   
   useEffect(() => {
     let interval: ReturnType<typeof setInterval> | null = null;
@@ -86,8 +105,9 @@ export function useBrowserAdaptiveSpeechRecognition(
   
   useEffect(() => {
     return () => {
-      recognitionRef.current?.abort();
-      if (chromeCycleTimerRef.current) clearTimeout(chromeCycleTimerRef.current);
+      primaryRecognitionRef.current?.abort();
+      secondaryRecognitionRef.current?.abort();
+      if (cycleTimerRef.current) clearTimeout(cycleTimerRef.current);
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
     };
   }, []);
@@ -95,49 +115,40 @@ export function useBrowserAdaptiveSpeechRecognition(
   const resetSilenceTimeout = useCallback(() => {
     if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
     silenceTimerRef.current = setTimeout(() => {
-      if (isListening && !isManualStopRef.current) {
+      if (isListeningRef.current && !isManualStopRef.current) {
         setError(new Error('No speech detected for extended period'));
       }
     }, mergedConfig.silenceTimeoutMs);
-  }, [isListening, mergedConfig.silenceTimeoutMs]);
+  }, [mergedConfig.silenceTimeoutMs]);
 
-  const scheduleChromeRecycle = useCallback(() => {
-    if (!browser.isChrome) return;
-    if (chromeCycleTimerRef.current) clearTimeout(chromeCycleTimerRef.current);
-    chromeCycleTimerRef.current = setTimeout(() => {
-      if (isListening && !isManualStopRef.current && recognitionRef.current) {
-        recognitionRef.current.stop();
-        setTimeout(() => {
-          if (!isManualStopRef.current && recognitionRef.current) {
-            try { recognitionRef.current.start(); scheduleChromeRecycle(); } catch {}
-          }
-        }, 200);
-      }
-    }, mergedConfig.chromeCycleIntervalMs);
-  }, [browser.isChrome, isListening, mergedConfig.chromeCycleIntervalMs]);
-
-  const createRecognition = useCallback(() => {
+  const createRecognitionInstance = useCallback((): SpeechRecognitionType | null => {
     const SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognitionAPI) return null;
+    
     const recognition = new SpeechRecognitionAPI();
     recognition.continuous = true;
     recognition.interimResults = true;
+    
     if (browser.isEdge) {
       // Edge: DO NOT set lang - preserves fillers
+      console.log('[SpeechRecognition] Creating Edge instance: Natural mode');
     } else if (browser.isChrome) {
       recognition.lang = selectedAccent;
+      console.log(`[SpeechRecognition] Creating Chrome instance: ${selectedAccent}`);
     } else {
       recognition.lang = selectedAccent;
     }
+    
     return recognition;
   }, [browser.isEdge, browser.isChrome, selectedAccent]);
 
-  const handleResult = useCallback((event: Event) => {
+  const handleResult = useCallback((event: Event, instanceId: string) => {
+    if (!isListeningRef.current) return;
+    
     const e = event as unknown as { resultIndex: number; results: SpeechRecognitionResultList };
     resetSilenceTimeout();
     pauseTrackerRef.current.recordSpeechEvent();
-    restartAttemptRef.current = 0;
-    if (e.resultIndex <= lastProcessedIndexRef.current) return;
+    consecutiveFailuresRef.current = 0;
     
     let newFinalText = '';
     let newInterimText = '';
@@ -146,20 +157,46 @@ export function useBrowserAdaptiveSpeechRecognition(
     for (let i = e.resultIndex; i < e.results.length; i++) {
       const result = e.results[i];
       const transcript = result[0].transcript;
+      
       if (result.isFinal) {
-        if (transcript === lastFinalTextRef.current) continue;
+        // CRITICAL: Deduplicate across all instances
+        const normalizedText = transcript.trim().toLowerCase();
+        if (lastProcessedTextRef.current.has(normalizedText) || transcript === lastFinalTextRef.current) {
+          console.log(`[SpeechRecognition] Skipping duplicate from ${instanceId}`);
+          continue;
+        }
+        
+        lastProcessedTextRef.current.add(normalizedText);
         lastFinalTextRef.current = transcript;
-        lastProcessedIndexRef.current = i;
+        
+        // Keep set size manageable
+        if (lastProcessedTextRef.current.size > 50) {
+          const entries = Array.from(lastProcessedTextRef.current);
+          lastProcessedTextRef.current = new Set(entries.slice(-30));
+        }
+        
         const finalWords = transcript.trim().split(/\s+/).filter((w: string) => w.length > 0);
         const finalWordsSet = new Set<string>(finalWords.map((w: string) => w.toLowerCase()));
+        
         if (browser.isChrome) {
           const recovered = ghostTrackerRef.current.extractAcceptedGhosts(finalWordsSet);
-          if (recovered.length > 0) setGhostWords(prev => [...prev, ...recovered]);
+          if (recovered.length > 0) {
+            console.log('[SpeechRecognition] Recovered ghost words:', recovered);
+            setGhostWords(prev => [...prev, ...recovered]);
+          }
         }
+        
         finalWords.forEach((text: string) => {
-          newWords.push({ text, timestamp: Date.now(), wordId: wordIdCounterRef.current++, isGhost: false, isFiller: GhostWordTracker.isFillerWord(text) });
+          newWords.push({
+            text,
+            timestamp: Date.now(),
+            wordId: wordIdCounterRef.current++,
+            isGhost: false,
+            isFiller: GhostWordTracker.isFillerWord(text)
+          });
         });
         newFinalText += transcript + ' ';
+        console.log(`[SpeechRecognition] Final from ${instanceId}:`, transcript.substring(0, 40));
       } else {
         newInterimText = transcript;
         if (browser.isChrome) {
@@ -167,6 +204,7 @@ export function useBrowserAdaptiveSpeechRecognition(
         }
       }
     }
+    
     if (newFinalText) {
       const trimmed = newFinalText.trim();
       setFinalTranscript(prev => (prev ? `${prev} ${trimmed}` : trimmed).trim());
@@ -176,53 +214,173 @@ export function useBrowserAdaptiveSpeechRecognition(
     setInterimTranscript(newInterimText);
   }, [browser.isChrome, resetSilenceTimeout]);
 
-  const handleError = useCallback((event: Event) => {
+  const handleError = useCallback((event: Event, instanceId: string) => {
     const e = event as unknown as { error: string };
     if (e.error === 'no-speech' || e.error === 'aborted') return;
-    setError(new Error(`Speech recognition error: ${e.error}`));
+    
+    console.warn(`[SpeechRecognition] Error from ${instanceId}:`, e.error);
+    consecutiveFailuresRef.current++;
+    
+    if (consecutiveFailuresRef.current >= MAX_CONSECUTIVE_FAILURES) {
+      setError(new Error(`Speech recognition error: ${e.error}`));
+    }
   }, []);
 
-  const handleEnd = useCallback(() => {
-    setInterimTranscript('');
-    if (!isManualStopRef.current && isListening) {
-      if (restartAttemptRef.current < mergedConfig.maxRestartAttempts) {
-        restartAttemptRef.current++;
-        setTimeout(() => { try { recognitionRef.current?.start(); } catch {} }, 100);
-      } else {
-        setIsListening(false);
-        setError(new Error('Speech recognition stopped unexpectedly'));
+  const handleEnd = useCallback((recognition: SpeechRecognitionType, instanceId: string) => {
+    if (!isListeningRef.current || isManualStopRef.current) return;
+    
+    console.log(`[SpeechRecognition] Instance ${instanceId} ended, restarting...`);
+    
+    // Immediate restart
+    setTimeout(() => {
+      if (isListeningRef.current && !isManualStopRef.current && recognition) {
+        try {
+          recognition.start();
+          console.log(`[SpeechRecognition] Instance ${instanceId} restarted`);
+        } catch {
+          // Already started or failed
+        }
       }
-    } else {
-      setIsListening(false);
-      pauseTrackerRef.current.stop();
-      setPauseMetrics(pauseTrackerRef.current.getMetrics());
+    }, 50);
+  }, []);
+
+  const setupRecognitionHandlers = useCallback((recognition: SpeechRecognitionType, instanceId: string) => {
+    recognition.onresult = (event: Event) => handleResult(event, instanceId);
+    recognition.onerror = (event: Event) => handleError(event, instanceId);
+    recognition.onend = () => handleEnd(recognition, instanceId);
+    recognition.onstart = () => {
+      if (!isListening) {
+        setIsListening(true);
+        setError(null);
+      }
+    };
+  }, [handleResult, handleError, handleEnd, isListening]);
+
+  const performSeamlessCycle = useCallback(() => {
+    if (!isListeningRef.current || isManualStopRef.current) return;
+    
+    const currentActive = activeInstanceRef.current;
+    const nextActive = currentActive === 'primary' ? 'secondary' : 'primary';
+    
+    console.log(`[SpeechRecognition] Starting seamless cycle: ${currentActive} -> ${nextActive}`);
+    
+    // Create and start new instance FIRST
+    const newRecognition = createRecognitionInstance();
+    if (!newRecognition) {
+      console.error('[SpeechRecognition] Failed to create new instance');
+      return;
     }
-  }, [isListening, mergedConfig.maxRestartAttempts]);
+    
+    setupRecognitionHandlers(newRecognition, nextActive);
+    
+    try {
+      newRecognition.start();
+      
+      if (nextActive === 'primary') {
+        primaryRecognitionRef.current = newRecognition;
+      } else {
+        secondaryRecognitionRef.current = newRecognition;
+      }
+      
+      // After overlap, stop old instance
+      setTimeout(() => {
+        if (!isListeningRef.current) return;
+        
+        const oldRecognition = currentActive === 'primary' 
+          ? primaryRecognitionRef.current 
+          : secondaryRecognitionRef.current;
+        
+        if (oldRecognition) {
+          try {
+            oldRecognition.abort();
+            console.log(`[SpeechRecognition] Old instance ${currentActive} stopped`);
+          } catch {
+            // Already stopped
+          }
+        }
+        
+        activeInstanceRef.current = nextActive;
+      }, OVERLAP_DURATION_MS);
+      
+    } catch (err) {
+      console.error('[SpeechRecognition] Failed to start new instance:', err);
+    }
+    
+    // Schedule next cycle
+    scheduleCycle();
+  }, [createRecognitionInstance, setupRecognitionHandlers]);
+
+  const scheduleCycle = useCallback(() => {
+    if (cycleTimerRef.current) {
+      clearTimeout(cycleTimerRef.current);
+    }
+    
+    const cycleInterval = browser.isChrome ? CHROME_CYCLE_INTERVAL_MS : EDGE_CYCLE_INTERVAL_MS;
+    
+    cycleTimerRef.current = setTimeout(() => {
+      if (isListeningRef.current && !isManualStopRef.current) {
+        performSeamlessCycle();
+      }
+    }, cycleInterval);
+  }, [browser.isChrome, performSeamlessCycle]);
 
   const startListening = useCallback(() => {
-    if (!isSupported) { setError(new Error('Speech recognition not supported')); return; }
-    const recognition = createRecognition();
-    if (!recognition) { setError(new Error('Failed to create speech recognition')); return; }
-    recognition.onresult = handleResult;
-    recognition.onerror = handleError;
-    recognition.onend = handleEnd;
-    recognition.onstart = () => { setIsListening(true); setError(null); };
-    recognitionRef.current = recognition;
+    if (!isSupported) {
+      setError(new Error('Speech recognition not supported'));
+      return;
+    }
+    
+    console.log('[SpeechRecognition] Starting...');
+    
+    const recognition = createRecognitionInstance();
+    if (!recognition) {
+      setError(new Error('Failed to create speech recognition'));
+      return;
+    }
+    
+    setupRecognitionHandlers(recognition, 'primary');
+    primaryRecognitionRef.current = recognition;
+    activeInstanceRef.current = 'primary';
+    
     isManualStopRef.current = false;
-    restartAttemptRef.current = 0;
-    lastProcessedIndexRef.current = -1;
+    isListeningRef.current = true;
+    consecutiveFailuresRef.current = 0;
+    lastProcessedTextRef.current = new Set();
     lastFinalTextRef.current = '';
+    wordIdCounterRef.current = 0;
     sessionStartTimeRef.current = Date.now();
     pauseTrackerRef.current.start();
     ghostTrackerRef.current.reset();
-    try { recognition.start(); resetSilenceTimeout(); if (browser.isChrome) scheduleChromeRecycle(); } catch (err) { setError(err instanceof Error ? err : new Error('Failed to start')); }
-  }, [isSupported, createRecognition, handleResult, handleError, handleEnd, resetSilenceTimeout, browser.isChrome, scheduleChromeRecycle]);
+    
+    try {
+      recognition.start();
+      resetSilenceTimeout();
+      scheduleCycle();
+    } catch (err) {
+      setError(err instanceof Error ? err : new Error('Failed to start'));
+    }
+  }, [isSupported, createRecognitionInstance, setupRecognitionHandlers, resetSilenceTimeout, scheduleCycle]);
 
   const stopListening = useCallback(() => {
+    console.log('[SpeechRecognition] Stopping...');
+    
     isManualStopRef.current = true;
-    if (chromeCycleTimerRef.current) clearTimeout(chromeCycleTimerRef.current);
+    isListeningRef.current = false;
+    
+    if (cycleTimerRef.current) clearTimeout(cycleTimerRef.current);
     if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-    recognitionRef.current?.stop();
+    
+    // Stop both instances
+    [primaryRecognitionRef.current, secondaryRecognitionRef.current].forEach(recognition => {
+      if (recognition) {
+        try {
+          recognition.stop();
+        } catch {
+          // Already stopped
+        }
+      }
+    });
+    
     setIsListening(false);
     pauseTrackerRef.current.stop();
     setPauseMetrics(pauseTrackerRef.current.getMetrics());
@@ -230,21 +388,67 @@ export function useBrowserAdaptiveSpeechRecognition(
 
   const abort = useCallback(() => {
     isManualStopRef.current = true;
-    if (chromeCycleTimerRef.current) clearTimeout(chromeCycleTimerRef.current);
+    isListeningRef.current = false;
+    
+    if (cycleTimerRef.current) clearTimeout(cycleTimerRef.current);
     if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-    recognitionRef.current?.abort();
+    
+    [primaryRecognitionRef.current, secondaryRecognitionRef.current].forEach(recognition => {
+      if (recognition) {
+        try {
+          recognition.abort();
+        } catch {
+          // Already stopped
+        }
+      }
+    });
+    
+    primaryRecognitionRef.current = null;
+    secondaryRecognitionRef.current = null;
     setIsListening(false);
   }, []);
 
   const clearTranscript = useCallback(() => {
-    setRawTranscript(''); setFinalTranscript(''); setInterimTranscript(''); setWords([]); setGhostWords([]); setPauseMetrics(null); setSessionDuration(0);
-    wordIdCounterRef.current = 0; ghostTrackerRef.current.reset(); pauseTrackerRef.current.reset();
+    setRawTranscript('');
+    setFinalTranscript('');
+    setInterimTranscript('');
+    setWords([]);
+    setGhostWords([]);
+    setPauseMetrics(null);
+    setSessionDuration(0);
+    wordIdCounterRef.current = 0;
+    lastProcessedTextRef.current = new Set();
+    lastFinalTextRef.current = '';
+    ghostTrackerRef.current.reset();
+    pauseTrackerRef.current.reset();
   }, []);
 
   const setAccent = useCallback((accent: string) => {
-    setSelectedAccent(accent); setStoredAccent(accent);
-    if (browser.isChrome && isListening) { stopListening(); setTimeout(() => startListening(), 200); }
+    setSelectedAccent(accent);
+    setStoredAccent(accent);
+    if (browser.isChrome && isListening) {
+      stopListening();
+      setTimeout(() => startListening(), 200);
+    }
   }, [browser.isChrome, isListening, stopListening, startListening]);
 
-  return { isListening, isSupported, error, rawTranscript, finalTranscript, interimTranscript, words, ghostWords, pauseMetrics, sessionDuration, browser, startListening, stopListening, abort, clearTranscript, selectedAccent, setAccent };
+  return {
+    isListening,
+    isSupported,
+    error,
+    rawTranscript,
+    finalTranscript,
+    interimTranscript,
+    words,
+    ghostWords,
+    pauseMetrics,
+    sessionDuration,
+    browser,
+    startListening,
+    stopListening,
+    abort,
+    clearTranscript,
+    selectedAccent,
+    setAccent
+  };
 }
