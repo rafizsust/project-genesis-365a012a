@@ -237,27 +237,29 @@ async function processJob(job: any, supabaseService: any, appEncryptionKey: stri
 
   console.log(`[processJob] Starting job ${jobId} for test ${test_id}, stage: ${stage || 'audio'}`);
 
-  // TEMPORARY: Force all evaluations to use text-based path when transcripts are available
-  // Audio-based Gemini evaluation is disabled temporarily to reduce costs
-  // The audio evaluation code is preserved below for future re-enablement
-  const hasTranscriptsForTextEval = partial_results?.transcripts && Object.keys(partial_results.transcripts).length > 0;
+  // Check evaluation mode from partial_results
+  const evaluationMode = partial_results?.evaluationMode || 'basic';
+  const hasTranscripts = partial_results?.transcripts && Object.keys(partial_results.transcripts).length > 0;
   
-  if (hasTranscriptsForTextEval) {
-    console.log(`[processJob] FORCING text-based evaluation for job ${jobId} (audio evaluation temporarily disabled)`);
+  console.log(`[processJob] Evaluation mode: ${evaluationMode}, hasTranscripts: ${hasTranscripts}`);
+  
+  // Route to appropriate evaluation path based on mode:
+  // - 'accuracy' mode: ALWAYS use audio-based evaluation (for accurate pronunciation scoring)
+  // - 'basic' mode with transcripts: use text-based evaluation (cheaper, faster)
+  // - 'basic' mode without transcripts: fall back to audio evaluation
+  
+  if (evaluationMode === 'accuracy') {
+    console.log(`[processJob] ACCURACY MODE: Using audio-based evaluation for job ${jobId}`);
+    // Fall through to audio evaluation below
+  } else if (hasTranscripts) {
+    console.log(`[processJob] BASIC MODE: Using text-based evaluation for job ${jobId}`);
     await processTextBasedEvaluation(job, supabaseService, appEncryptionKey);
     return;
-  }
-
-  // Check if this is a text-based evaluation (transcripts available) - original condition
-  if (stage === 'pending_text_eval' && partial_results?.transcripts) {
-    console.log(`[processJob] Using text-based evaluation for job ${jobId}`);
-    await processTextBasedEvaluation(job, supabaseService, appEncryptionKey);
-    return;
+  } else {
+    console.log(`[processJob] BASIC MODE without transcripts: Falling back to audio evaluation for job ${jobId}`);
   }
   
-  // AUDIO-BASED EVALUATION CODE BELOW IS TEMPORARILY DISABLED
-  // When no transcripts are available, we fall through to audio evaluation
-  // TODO: Re-enable audio evaluation when needed by removing the force-text-eval check above
+  // AUDIO-BASED EVALUATION - Used for 'accuracy' mode or when no transcripts available
 
   // Get test payload
   const { data: testRow } = await supabaseService
@@ -780,50 +782,116 @@ Clarity: ${seg.clarity}% | Pitch Variation: ${seg.pitch.toFixed(0)}%`).join('\n'
 
   const numSegments = orderedSegments.length;
 
-  return `You are a CERTIFIED SENIOR IELTS Speaking Examiner with 20+ years of experience.
-Evaluate these responses exactly as an official IELTS examiner. Return ONLY valid JSON.
+  return `You are an OFFICIAL IELTS SPEAKING EXAMINER operating under strict British Council and IDP examination standards.
 
-## CONTEXT
-Topic: ${topic} | Difficulty: ${difficulty} | Total Segments: ${numSegments}
-${fluencyFlag ? '⚠️ Short Part 2 response - apply fluency penalty.' : ''}
+═══════════════════════════════════════════════════════════════════════════════
+CRITICAL EXAMINATION PROTOCOL
+═══════════════════════════════════════════════════════════════════════════════
 
-## IMPORTANT: TRANSCRIPT CORRECTION
-The transcripts below are from BROWSER speech recognition which is often INACCURATE.
-Use your linguistic expertise to INTELLIGENTLY CORRECT obvious transcription errors.
-Example: "10 kilo would like" should likely be "The skill I would like"
-When outputting candidateResponse and transcripts, provide your CORRECTED version, not the raw errors.
+You MUST evaluate this candidate EXACTLY as a real IELTS examiner would in an official test center. Your assessment must be:
 
-## CANDIDATE RESPONSES (from browser speech recognition - may contain errors)
+1. **INDISTINGUISHABLE FROM HUMAN EXAMINER** - Your scores must match what a certified IELTS examiner would give in a live test. No inflation. No deflation.
+
+2. **STRICTLY OBJECTIVE** - Personal opinions are irrelevant. Only the official IELTS Band Descriptors determine the score. Every score must be justified by specific evidence from the candidate's speech.
+
+3. **PROFESSIONALLY CALIBRATED** - Band 9 is exceptionally rare (native-level fluency with no errors). Band 7+ requires consistent demonstration of complex language use. Most candidates score 5.5-6.5.
+
+4. **EVIDENCE-BASED SCORING** - Each band score MUST be supported by:
+   - Direct quotes from the candidate's response
+   - Specific examples of strengths and weaknesses
+   - Clear explanation of why the score is NOT higher or lower
+
+═══════════════════════════════════════════════════════════════════════════════
+EXAMINATION CONTEXT
+═══════════════════════════════════════════════════════════════════════════════
+
+Topic: ${topic} | Difficulty Level: ${difficulty} | Total Responses: ${numSegments}
+${fluencyFlag ? '⚠️ FLUENCY PENALTY APPLICABLE: Part 2 speaking time below 80 seconds indicates insufficient response length.' : ''}
+
+═══════════════════════════════════════════════════════════════════════════════
+TRANSCRIPT CORRECTION PROTOCOL
+═══════════════════════════════════════════════════════════════════════════════
+
+The transcripts below contain SPEECH RECOGNITION ERRORS from browser-based transcription.
+Apply your expertise to INTELLIGENTLY CORRECT obvious errors while preserving the candidate's actual language use.
+
+Example corrections:
+- "10 kilo would like" → "The skill I would like"
+- "I'm gonna go to" → "I'm going to go to" (preserve informal register if candidate used it)
+
+DO NOT:
+- Add vocabulary the candidate did not use
+- Correct grammatical errors (those reflect the candidate's actual language ability)
+- Change the meaning or content of responses
+
+═══════════════════════════════════════════════════════════════════════════════
+CANDIDATE RESPONSES (Raw Transcripts - Correct Recognition Errors Only)
+═══════════════════════════════════════════════════════════════════════════════
+
 ${segmentSummaries}
 
-══════════════════════════════════════════════════════════════
-OFFICIAL IELTS BAND DESCRIPTORS
-══════════════════════════════════════════════════════════════
+═══════════════════════════════════════════════════════════════════════════════
+OFFICIAL IELTS SPEAKING BAND DESCRIPTORS (MANDATORY APPLICATION)
+═══════════════════════════════════════════════════════════════════════════════
 
 FLUENCY AND COHERENCE (FC):
-- Band 9: Speaks fluently with rare hesitation; hesitation is content-related
-- Band 7: Speaks at length without noticeable effort; some language-related hesitation
-- Band 5: Maintains flow with repetition/self-correction/slow speech
-- Band 4: Cannot respond without noticeable pauses; frequent repetition
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+• Band 9: Speaks fluently with only rare repetition or self-correction. Any hesitation is content-related. Develops topics fully and coherently.
+• Band 8: Speaks fluently with only occasional repetition or self-correction. Hesitation is usually content-related. Develops topics coherently.
+• Band 7: Speaks at length without noticeable effort or loss of coherence. May demonstrate language-related hesitation. Uses range of connectives.
+• Band 6: Is willing to speak at length though may lose coherence due to occasional repetition, self-correction or hesitation. Uses connectives but not always appropriately.
+• Band 5: Maintains flow of speech but uses repetition, self-correction and/or slow speech to keep going. May over-use certain connectives.
+• Band 4: Cannot respond without noticeable pauses. Speech may be slow. Frequently repeats and/or self-corrects.
 
 LEXICAL RESOURCE (LR):
-- Band 9: Full flexibility; idiomatic language naturally
-- Band 7: Flexible vocabulary; some less common/idiomatic vocabulary
-- Band 5: Limited vocabulary; pauses to search for words
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+• Band 9: Uses vocabulary with full flexibility and precision. Uses idiomatic language naturally and accurately.
+• Band 8: Uses a wide vocabulary resource readily and flexibly. Uses less common and idiomatic vocabulary skillfully.
+• Band 7: Uses vocabulary resource flexibly to discuss variety of topics. Uses some less common and idiomatic vocabulary.
+• Band 6: Has a wide enough vocabulary for topic but sometimes lacks precision. Uses paraphrase effectively.
+• Band 5: Manages to talk about familiar and unfamiliar topics but uses vocabulary with limited flexibility. May make errors in word choice.
+• Band 4: Uses basic vocabulary for familiar topics. Frequently makes errors. Rarely attempts paraphrase.
 
 GRAMMATICAL RANGE AND ACCURACY (GRA):
-- Band 9: Full range of structures; consistently accurate
-- Band 7: Range of complex structures; frequently error-free
-- Band 5: Basic sentence forms; limited complex structures
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+• Band 9: Uses a full range of structures naturally and appropriately. Consistently produces accurate structures.
+• Band 8: Uses a wide range of structures flexibly. Majority of sentences are error-free. Makes only occasional mistakes.
+• Band 7: Uses a range of complex structures with some flexibility. Frequently produces error-free sentences though some grammatical mistakes persist.
+• Band 6: Uses a mix of simple and complex structures but with limited flexibility. May make frequent mistakes with complex structures.
+• Band 5: Produces basic sentence forms with reasonable accuracy. Uses limited range of complex structures.
+• Band 4: Uses only basic sentence forms. Makes frequent errors. Rarely uses complex structures.
 
-PRONUNCIATION (P) - Estimated from speech recognition patterns:
-- Band 9: Full range of features with precision
-- Band 7: Most features of Band 8; some L1 influence
-- Band 5: Some Band 6 features; mispronounces individual words
+PRONUNCIATION (P) - Assessed via Speech Recognition Patterns:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+• Band 9: Uses full range of pronunciation features with precision and subtlety. Effortlessly comprehensible throughout.
+• Band 8: Uses a wide range of features. Sustains flexible use of features with only occasional lapses. Easy to understand.
+• Band 7: Shows all positive features of Band 6 and some of Band 8. Generally easy to understand.
+• Band 6: Uses range of features with mixed control. Can generally be understood but mispronunciation occasionally causes strain.
+• Band 5: Shows some effective use of features but not sustained. Mispronunciations are frequent and cause some difficulty.
+• Band 4: Uses limited range of features. Frequently unintelligible.
 
-══════════════════════════════════════════════════════════════
-REQUIRED JSON OUTPUT SCHEMA
-══════════════════════════════════════════════════════════════
+NOTE: Pronunciation is estimated from speech recognition confidence patterns. Include disclaimer in output.
+
+═══════════════════════════════════════════════════════════════════════════════
+SCORING CALIBRATION GUIDANCE
+═══════════════════════════════════════════════════════════════════════════════
+
+AVOID THESE COMMON ERRORS:
+✗ Giving Band 7+ for simple vocabulary even if error-free (complexity required)
+✗ Giving Band 8+ unless candidate demonstrates exceptional, near-native fluency
+✗ Inflating scores due to interesting content (we assess LANGUAGE, not ideas)
+✗ Deflating scores due to accent (intelligibility matters, not accent type)
+✗ Giving same band across all criteria (candidates typically vary ±1 band between criteria)
+
+CALIBRATION CHECKPOINTS:
+• Is this score justified by SPECIFIC examples from the transcript?
+• Would a certified IELTS examiner agree with this score?
+• Have I applied ALL relevant descriptors, not just favorable ones?
+• Am I assessing LANGUAGE ABILITY, not personality or content?
+
+═══════════════════════════════════════════════════════════════════════════════
+REQUIRED JSON OUTPUT FORMAT
+═══════════════════════════════════════════════════════════════════════════════
 
 \`\`\`json
 {
@@ -834,23 +902,23 @@ REQUIRED JSON OUTPUT SCHEMA
     "grammatical_range": { "band": 6.5, "feedback": "...", "strengths": ["..."], "weaknesses": ["..."], "suggestions": ["..."] },
     "pronunciation": { "band": 6.0, "feedback": "...", "strengths": ["..."], "weaknesses": ["..."], "suggestions": ["..."], "disclaimer": "Estimated from speech recognition patterns" }
   },
-  "summary": "Overall performance summary in 2-3 sentences",
-  "examiner_notes": "Brief examiner observation",
-  "lexical_upgrades": [{"original": "word used", "upgraded": "band 8+ alternative", "context": "how to use it"}],
+  "summary": "Examiner's overall assessment summary (2-3 sentences)",
+  "examiner_notes": "Professional observation on candidate's key areas for development",
+  "lexical_upgrades": [{"original": "word used", "upgraded": "band 8+ alternative", "context": "usage example"}],
   "improvement_priorities": ["Priority 1...", "Priority 2..."],
-  "strengths_to_maintain": ["Key strength 1...", "Key strength 2..."],
+  "strengths_to_maintain": ["Strength 1...", "Strength 2..."],
   "part_analysis": [
     {
       "part_number": 1,
-      "performance_notes": "Summary of Part 1 performance",
-      "key_moments": ["Positive moment 1", "Positive moment 2"],
-      "areas_for_improvement": ["Area 1", "Area 2"]
+      "performance_notes": "Part 1 assessment",
+      "key_moments": ["Positive moment 1"],
+      "areas_for_improvement": ["Area 1"]
     }
   ],
   "transcripts_by_part": {
-    "1": "Combined transcript for Part 1...",
-    "2": "Combined transcript for Part 2...",
-    "3": "Combined transcript for Part 3..."
+    "1": "Combined corrected transcript for Part 1...",
+    "2": "Combined corrected transcript for Part 2...",
+    "3": "Combined corrected transcript for Part 3..."
   },
   "transcripts_by_question": {
     "1": [{"segment_key": "part1-q...", "question_number": 1, "question_text": "...", "transcript": "..."}],
@@ -863,25 +931,28 @@ REQUIRED JSON OUTPUT SCHEMA
       "partNumber": 1,
       "questionNumber": 1,
       "question": "Question text",
-      "candidateResponse": "EXACT transcript from input",
+      "candidateResponse": "Corrected transcript (speech recognition errors fixed)",
       "estimatedBand": 5.5,
-      "modelAnswer": "A band 8+ model answer that addresses the same question naturally and fluently",
-      "whyItWorks": ["Uses idiomatic expressions", "Shows range of vocabulary", "Maintains coherent flow"],
-      "keyImprovements": ["Replace 'good' with 'exceptional'", "Add a specific example", "Use more complex grammar"]
+      "modelAnswer": "Band 8+ model response demonstrating excellent language use",
+      "whyItWorks": ["Uses sophisticated vocabulary", "Demonstrates complex grammar", "Maintains fluent delivery"],
+      "keyImprovements": ["Specific improvement 1", "Specific improvement 2"]
     }
   ]
 }
 \`\`\`
 
-IMPORTANT INSTRUCTIONS:
-1. Return EXACTLY ${numSegments} modelAnswers, one for each segment above
-2. Use the EXACT segment_key from the input (e.g., "part1-q123")
-3. Copy the EXACT transcript as candidateResponse
-4. Generate a realistic band 8+ model answer for the same question
-5. Include part_analysis for each part that has responses
-6. Group transcripts by part and by question in the output
+═══════════════════════════════════════════════════════════════════════════════
+FINAL INSTRUCTIONS
+═══════════════════════════════════════════════════════════════════════════════
 
-Return ONLY the JSON, no explanation.`;
+1. Return EXACTLY ${numSegments} modelAnswers (one per segment above)
+2. Use the EXACT segment_key from input (e.g., "part1-q123")
+3. Provide CORRECTED transcript as candidateResponse
+4. Generate REALISTIC band 8+ model answers
+5. Include part_analysis for each part with responses
+6. Group transcripts by part and by question
+
+Return ONLY valid JSON. No preamble. No explanation.`;
 }
 
 async function decryptKey(encrypted: string, appKey: string): Promise<string> {
