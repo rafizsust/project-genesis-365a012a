@@ -29,10 +29,9 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-gemini-api-key',
 };
 
-// Model priority: gemini-2.5-flash first (best quality), then 2.0-flash fallback
+// Only use gemini-2.5-flash for speaking evaluation (2.0-flash doesn't work reliably)
 const GEMINI_MODELS = [
   'gemini-2.5-flash',
-  'gemini-2.0-flash',
 ];
 
 // Custom error class for quota exhaustion / rate limiting

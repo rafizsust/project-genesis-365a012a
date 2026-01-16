@@ -30,10 +30,9 @@ function stableSpeakingQuestionId(partNumber: 1 | 2 | 3, idx: number, text: stri
   return `p${partNumber}-q${idx + 1}-${stableHashHex(text)}`;
 }
 
-// Model priority: gemini-2.5-flash as primary, gemini-2.0-flash as fallback
+// Only use gemini-2.5-flash for speaking evaluation (2.0-flash doesn't work reliably)
 const GEMINI_MODELS_FALLBACK_ORDER = [
   'gemini-2.5-flash',
-  'gemini-2.0-flash',
 ];
 
 // Exponential backoff configuration
