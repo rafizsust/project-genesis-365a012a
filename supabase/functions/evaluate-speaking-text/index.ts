@@ -10,9 +10,9 @@ import {
 import { createPerformanceLogger } from "../_shared/performanceLogger.ts";
 
 /**
- * Text-Based Speaking Evaluation
- * Receives transcripts + fluency/prosody metrics instead of audio.
- * ~95% cheaper than audio-based evaluation.
+ * Text-Based Speaking Evaluation - SIMPLIFIED
+ * Receives raw transcripts from browser Web Speech API.
+ * No word confidence or prosody metrics - just evaluates the transcript content.
  */
 
 const corsHeaders = {
@@ -21,27 +21,12 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
-const GEMINI_MODELS = ['gemini-2.5-flash']; // Only use 2.5-flash for speaking evaluation
+const GEMINI_MODELS = ['gemini-2.5-flash'];
 
 interface TranscriptData {
   rawTranscript: string;
-  cleanedTranscript: string;
-  wordConfidences: Array<{ word: string; confidence: number; isFiller: boolean; isRepeat: boolean }>;
-  fluencyMetrics: {
-    wordsPerMinute: number;
-    pauseCount: number;
-    fillerCount: number;
-    fillerRatio: number;
-    repetitionCount: number;
-    overallFluencyScore: number;
-  };
-  prosodyMetrics: {
-    pitchVariation: number;
-    stressEventCount: number;
-    rhythmConsistency: number;
-  };
   durationMs: number;
-  overallClarityScore: number;
+  browserMode?: string;
 }
 
 interface EvaluationRequest {
@@ -75,14 +60,12 @@ serve(async (req) => {
 
     console.log(`[evaluate-speaking-text] Processing ${Object.keys(transcripts).length} segments for test ${testId}`);
 
-    // Get test details
     const { data: testRow } = await supabaseService
       .from('ai_practice_tests')
       .select('payload, topic, difficulty')
       .eq('id', testId)
       .maybeSingle();
 
-    // Build evaluation prompt
     const prompt = buildTextEvaluationPrompt(
       transcripts,
       topic || (testRow as any)?.topic || 'general',
@@ -91,7 +74,6 @@ serve(async (req) => {
       testRow?.payload
     );
 
-    // Get API keys
     const dbApiKeys = await getActiveGeminiKeysForModels(supabaseService, GEMINI_MODELS);
     if (dbApiKeys.length === 0) {
       throw new Error('No API keys available');
@@ -145,7 +127,6 @@ serve(async (req) => {
 
     if (!result) throw new Error('All API keys exhausted');
 
-    // Save results
     await supabaseService.from('ai_practice_results').upsert({
       user_id: userId,
       test_id: testId,
@@ -188,71 +169,38 @@ function buildTextEvaluationPrompt(
   const segmentSummaries = Object.entries(transcripts).map(([key, d]) => {
     const match = key.match(/^part([123])-q(.+)$/);
     const qInfo = match ? questionById.get(match[2]) : null;
-    
-    // Calculate average word confidence
-    const avgWordConfidence = d.wordConfidences.length > 0
-      ? (d.wordConfidences.reduce((sum, w) => sum + w.confidence, 0) / d.wordConfidences.length).toFixed(0)
-      : 0;
-    
-    // Find low confidence words
-    const lowConfWords = d.wordConfidences
-      .filter(w => w.confidence < 70)
-      .map(w => `"${w.word}" (${w.confidence}%)`)
-      .slice(0, 5)
-      .join(', ') || 'None';
+    const durationSec = Math.round(d.durationMs / 1000);
+    const wordCount = d.rawTranscript.split(/\s+/).filter(w => w.length > 0).length;
+    const wpm = durationSec > 0 ? Math.round((wordCount / durationSec) * 60) : 0;
     
     return `
 ### ${key.toUpperCase()}
 Question: ${qInfo?.questionText || 'Unknown'}
 Transcript: "${d.rawTranscript}"
-Duration: ${Math.round(d.durationMs / 1000)}s | WPM: ${d.fluencyMetrics.wordsPerMinute}
-Fillers: ${d.fluencyMetrics.fillerCount} (${(d.fluencyMetrics.fillerRatio * 100).toFixed(1)}%) | Pauses: ${d.fluencyMetrics.pauseCount}
-Clarity Score: ${d.overallClarityScore}% | Pitch Variation: ${d.prosodyMetrics.pitchVariation.toFixed(0)}%
-Rhythm Consistency: ${d.prosodyMetrics.rhythmConsistency.toFixed(0)}%
-Avg Word Confidence: ${avgWordConfidence}%
-Low Confidence Words: ${lowConfWords}`;
+Duration: ${durationSec}s | Words: ${wordCount} | WPM: ${wpm}`;
   }).join('\n');
 
-  return `You are an IELTS Speaking examiner. Evaluate this candidate's responses.
-
-## DATA SOURCE
-- Transcripts from browser speech recognition (Web Speech API)
-- Fluency/prosody metrics from real-time audio analysis
-- Word confidence from speech recognition stability tracking
+  return `You are an IELTS Speaking examiner. Evaluate this candidate's responses based on the transcripts.
 
 Topic: ${topic} | Difficulty: ${difficulty}
 ${fluencyFlag ? '⚠️ FLUENCY FLAG: Short Part 2 response (should be ~2 minutes)' : ''}
 
 ${segmentSummaries}
 
-## SCORING ADJUSTMENTS (CRITICAL)
-
-1. **Grammar Bias:** The transcript is from AI Speech-to-Text which auto-corrects grammar.
-   - Assume simple, error-free sentences are a result of auto-correct (Cap Grammar at Band 6.0).
-   - ONLY award high Grammar scores (7+) if you see explicit Complex Structures (conditionals, passive voice, relative clauses, embedded clauses).
-   - Look for: "If I had...", "...which was...", "Having done...", "It is believed that...", etc.
-
-2. **Pronunciation Bias:** You cannot hear the audio.
-   - Base pronunciation STRICTLY on "Word Confidence" and "Pitch Variation".
-   - High Confidence (>80%) + High Pitch Variance (>40%) = Good Pronunciation (6.5-7+).
-   - Medium Confidence (60-80%) + Medium Pitch = Average Pronunciation (5.5-6.5).
-   - Low Confidence (<60%) OR Flat Pitch (<25%) = Poor Pronunciation (4.5-5.5).
-   - Low confidence words listed above may indicate unclear pronunciation.
-
-3. **Fluency Scoring:**
-   - Use the measured WPM (120-180 is ideal for IELTS).
-   - Penalize high filler ratio (>5%) and excessive pauses.
-   - Rhythm consistency <50% indicates choppy delivery.
+## IMPORTANT NOTES
+- These transcripts are from browser speech recognition - they may have minor errors
+- Base your evaluation on the CONTENT, vocabulary, and grammar visible in the text
+- For pronunciation: You cannot hear audio, so base this on complexity of vocabulary used and assume average pronunciation (Band 6) unless content suggests otherwise
 
 ## OUTPUT (JSON only)
 \`\`\`json
 {
   "overall_band": 6.5,
   "criteria": {
-    "fluency_coherence": { "band": 6.5, "feedback": "...", "strengths": [], "weaknesses": [], "based_on": "Measured: X WPM, Y pauses, Z% filler ratio" },
+    "fluency_coherence": { "band": 6.5, "feedback": "...", "strengths": [], "weaknesses": [] },
     "lexical_resource": { "band": 6.0, "feedback": "...", "strengths": [], "weaknesses": [], "lexical_upgrades": [{"original": "good", "upgraded": "exceptional", "context": "..."}] },
-    "grammatical_range": { "band": 6.0, "feedback": "...", "strengths": [], "weaknesses": [], "complex_structures_found": ["...", "..."] },
-    "pronunciation": { "band": 6.0, "feedback": "...", "disclaimer": "Estimated from speech recognition confidence and prosody", "based_on": "Avg confidence X%, Pitch variation Y%" }
+    "grammatical_range": { "band": 6.0, "feedback": "...", "strengths": [], "weaknesses": [] },
+    "pronunciation": { "band": 6.0, "feedback": "Estimated from text complexity", "strengths": [], "weaknesses": [] }
   },
   "improvement_priorities": ["...", "..."],
   "examiner_notes": "..."

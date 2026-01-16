@@ -1,47 +1,27 @@
 /**
- * Advanced Speech Analysis Hook
- * Orchestrates browser-adaptive speech recognition and audio analysis for text-based evaluation
- *
- * ARCHITECTURE PRINCIPLES (ACCURACY FIRST):
+ * Advanced Speech Analysis Hook - SIMPLIFIED VERSION
  * 
- * 1. CAPTURE EVERYTHING THE USER SAYS
- *    - No aggressive deduplication that removes legitimate repeated sentences
- *    - No ghost word recovery that corrupts transcripts
- *    - Simple exact-duplicate prevention only
+ * This version captures the raw final transcript from the browser's Web Speech API
+ * without post-processing (no confidence tracking, audio extraction, or prosody analysis).
  * 
- * 2. SINGLE SpeechRecognition INSTANCE per session
- *    - Proactive restart via watchdog (stop only)
- *    - Restart occurs ONLY inside onend (same instance)
+ * The transcript is submitted directly to Gemini for evaluation.
  * 
- * 3. BROWSER-ADAPTIVE CONFIG
- *    - Chrome: User-selected accent, controlled cycling
- *    - Edge: Auto-detect language, more tolerance
+ * ARCHITECTURE:
+ * 1. CAPTURE: Use Web Speech API to get final transcript
+ * 2. RESTART: Watchdog proactively restarts before browser timeout (~35s Chrome, ~45s Edge)
+ * 3. BROWSER-ADAPTIVE: Chrome uses accent selection, Edge uses natural mode
  */
 
 import { useState, useRef, useCallback } from 'react';
-import { AudioFeatureExtractor, AudioAnalysisResult } from '@/lib/audioFeatureExtractor';
-import { analyzeProsody, ProsodyMetrics, createEmptyProsodyMetrics } from '@/lib/prosodyAnalyzer';
-import { WordConfidenceTracker, WordConfidence } from '@/lib/wordConfidenceTracker';
-import { calculateFluency, FluencyMetrics, createEmptyFluencyMetrics } from '@/lib/fluencyCalculator';
 import {
   detectBrowser,
-  PauseTracker,
   getStoredAccent,
   BrowserInfo
 } from '@/lib/speechRecognition';
 
 export interface SpeechAnalysisResult {
-  rawTranscript: string;           // What browser heard (with fillers, for fluency)
-  cleanedTranscript: string;       // Fillers removed (for vocab/grammar)
-  wordConfidences: WordConfidence[];
-  fluencyMetrics: FluencyMetrics;
-  prosodyMetrics: ProsodyMetrics;
-  audioAnalysis: AudioAnalysisResult;
-  durationMs: number;
-  overallClarityScore: number;     // 0-100
-  // Browser-adaptive additions
-  ghostWords: string[];            // DEPRECATED: Always empty now (ghost recovery removed)
-  pauseBreakdowns: number;         // Number of significant pauses
+  rawTranscript: string;           // What browser heard - the final transcript
+  durationMs: number;              // How long the user spoke
   browserMode: 'edge-natural' | 'chrome-accent' | 'other';
 }
 
@@ -49,7 +29,6 @@ interface UseAdvancedSpeechAnalysisOptions {
   language?: string;
   onInterimResult?: (transcript: string) => void;
   onError?: (error: Error) => void;
-  onGhostWordRecovered?: (word: string) => void; // DEPRECATED: No longer called
 }
 
 // Browser SpeechRecognition types
@@ -99,18 +78,10 @@ declare global {
 
 // Proactive restart BEFORE Chrome's ~45-second cutoff
 const CHROME_MAX_SESSION_MS = 35000;
-
-// Edge restart interval
 const EDGE_MAX_SESSION_MS = 45000;
-
-// Delay before restarting after onend (Edge needs extra time for late results)
 const RESTART_DELAY_MS = 250;
 const EDGE_LATE_RESULT_DELAY_MS = 300;
-
-// Watchdog check interval
 const WATCHDOG_INTERVAL_MS = 2000;
-
-// Maximum consecutive restart attempts before giving up
 const MAX_CONSECUTIVE_FAILURES = 10;
 
 export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOptions = {}) {
@@ -118,15 +89,11 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
   const [interimTranscript, setInterimTranscript] = useState('');
   const [error, setError] = useState<Error | null>(null);
   const [isSupported, setIsSupported] = useState(true);
-  const [currentRms, setCurrentRms] = useState(0);
 
   // Browser detection
   const browserRef = useRef<BrowserInfo>(detectBrowser());
 
-  const audioExtractorRef = useRef<AudioFeatureExtractor | null>(null);
-  const wordTrackerRef = useRef<WordConfidenceTracker | null>(null);
-
-  // SINGLE recognition instance (non-negotiable)
+  // SINGLE recognition instance
   const recognitionRef = useRef<SpeechRecognition | null>(null);
 
   // Controlled restart flags
@@ -137,19 +104,15 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
   const watchdogTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // CRITICAL: Append-only transcript storage
-  // We ONLY append new final results, never modify or deduplicate
   const finalSegmentsRef = useRef<string[]>([]);
   
   const startTimeRef = useRef(0);
   const isAnalyzingRef = useRef(false);
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
-  const rmsMonitorRef = useRef<number | null>(null);
 
-  // Browser-adaptive tracking
-  const pauseTrackerRef = useRef<PauseTracker | null>(null);
   const consecutiveFailuresRef = useRef(0);
   
-  // Simple exact-duplicate prevention (only prevents the EXACT same segment from being added twice in a row)
+  // Simple exact-duplicate prevention
   const lastExactFinalRef = useRef('');
 
   // Timing
@@ -165,7 +128,6 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
 
   /**
    * Create a new speech recognition instance with browser-specific configuration
-   * IMPORTANT: Called ONLY once per recording session.
    */
   const createRecognitionInstance = useCallback((): SpeechRecognition | null => {
     const SpeechRecognitionClass = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -193,18 +155,11 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
   }, []);
 
   /**
-   * Handle speech recognition results
-   * 
-   * CRITICAL: This is the SIMPLE, ROBUST version.
-   * - No overlap detection (it was removing repeated sentences)
-   * - No ghost word recovery (it was corrupting transcripts)
-   * - Only exact-duplicate prevention for immediate back-to-back duplicates
+   * Handle speech recognition results - SIMPLIFIED
+   * Just captures the final transcript without any processing
    */
   const handleResult = useCallback((event: SpeechRecognitionEvent) => {
     if (!isAnalyzingRef.current) return;
-
-    // Record speech event for pause tracking
-    pauseTrackerRef.current?.recordSpeechEvent();
 
     // Reset failure counter on successful result
     consecutiveFailuresRef.current = 0;
@@ -218,29 +173,19 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
       if (result.isFinal) {
         const trimmed = text.trim();
         
-        // ONLY skip if this is EXACTLY the same as the last final (back-to-back duplicate)
-        // This prevents the SAME recognition result from being processed twice
-        // But ALLOWS the user to intentionally repeat sentences
+        // Only skip if this is EXACTLY the same as the last final (back-to-back duplicate)
         if (trimmed === lastExactFinalRef.current) {
           console.log('[SpeechAnalysis] Skipping exact back-to-back duplicate');
           continue;
         }
         
         if (trimmed.length > 0) {
-          // Store as the last exact final for duplicate check
           lastExactFinalRef.current = trimmed;
-          
-          // APPEND to our segments array - never modify previous segments
           finalSegmentsRef.current.push(trimmed);
-          
-          // Track for word confidence
-          wordTrackerRef.current?.addSnapshot(trimmed, true);
-          
           console.log('[SpeechAnalysis] Final segment added:', trimmed.substring(0, 60));
         }
       } else {
         interimText += text;
-        wordTrackerRef.current?.addSnapshot(text, false);
       }
     }
 
@@ -269,8 +214,7 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
   }, [options]);
 
   /**
-   * Handle recognition end with SAFE restart.
-   * IMPORTANT: NEVER create a new instance here.
+   * Handle recognition end with SAFE restart
    */
   const handleEnd = useCallback(() => {
     if (!isAnalyzingRef.current) return;
@@ -286,8 +230,6 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
 
     if (!isAnalyzingRef.current || isManualStopRef.current) return;
 
-    // Only restart if we intentionally stopped OR if browser cut off unexpectedly.
-    // In both cases we restart the SAME instance.
     const delay = browser.isEdge ? EDGE_LATE_RESULT_DELAY_MS : RESTART_DELAY_MS;
 
     setTimeout(() => {
@@ -296,12 +238,8 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
         return;
       }
 
-      // Reset the per-session timer
       sessionStartRef.current = Date.now();
       isRestartingRef.current = false;
-      
-      // Clear the exact-match duplicate check for new session
-      // This allows repeated content across restart boundaries
       lastExactFinalRef.current = '';
 
       try {
@@ -324,7 +262,7 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
   }, [handleResult, handleError, handleEnd]);
 
   /**
-   * Watchdog: the ONLY place allowed to call stop() for proactive restart.
+   * Watchdog: proactive restart before browser timeout
    */
   const startWatchdog = useCallback(() => {
     if (watchdogTimerRef.current) {
@@ -345,7 +283,7 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
         try {
           recognitionRef.current?.stop();
         } catch {
-          // If stop throws, let onend path handle restart attempt via next end.
+          // If stop throws, let onend path handle restart attempt
         }
       }
     }, WATCHDOG_INTERVAL_MS);
@@ -358,7 +296,7 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
     }
   }, []);
 
-  const start = useCallback(async (stream: MediaStream) => {
+  const start = useCallback(async (_stream: MediaStream) => {
     const browser = browserRef.current;
     console.log(`[SpeechAnalysis] Starting with browser: ${browser.browserName}`);
 
@@ -377,9 +315,8 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
     isRestartingRef.current = false;
 
     setInterimTranscript('');
-    setCurrentRms(0);
 
-    // CRITICAL: Reset to empty segments array
+    // Reset to empty segments array
     finalSegmentsRef.current = [];
     lastExactFinalRef.current = '';
     
@@ -398,27 +335,6 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
       console.warn('[SpeechAnalysis] Wake lock not available:', err);
     }
 
-    // Initialize browser-adaptive trackers
-    pauseTrackerRef.current = new PauseTracker();
-    pauseTrackerRef.current.start();
-
-    // Start audio feature extraction
-    audioExtractorRef.current = new AudioFeatureExtractor();
-    await audioExtractorRef.current.start(stream);
-
-    // Start RMS monitoring
-    rmsMonitorRef.current = window.setInterval(() => {
-      const frames = audioExtractorRef.current?.getRecentFrames?.(5) || [];
-      if (frames.length > 0) {
-        const avgRms = frames.reduce((sum, f) => sum + f.rms, 0) / frames.length;
-        setCurrentRms(avgRms);
-      }
-    }, 200);
-
-    // Start word confidence tracking
-    wordTrackerRef.current = new WordConfidenceTracker();
-    wordTrackerRef.current.start();
-
     // Create and start SINGLE recognition instance
     const recognition = createRecognitionInstance();
     if (!recognition) {
@@ -433,7 +349,7 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
       recognition.start();
       console.log('[SpeechAnalysis] Recognition started');
 
-      // Start watchdog for proactive restarts (stop only)
+      // Start watchdog for proactive restarts
       startWatchdog();
     } catch (err) {
       setError(err instanceof Error ? err : new Error('Failed to start speech recognition'));
@@ -456,16 +372,9 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
 
     setIsAnalyzing(false);
     isAnalyzingRef.current = false;
-    setCurrentRms(0);
 
     // Stop watchdog
     stopWatchdog();
-
-    // Stop RMS monitor
-    if (rmsMonitorRef.current) {
-      clearInterval(rmsMonitorRef.current);
-      rmsMonitorRef.current = null;
-    }
 
     // Release wake lock
     if (wakeLockRef.current) {
@@ -481,90 +390,32 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
       } catch {
         // Already stopped
       }
-      // Clear ref to avoid any accidental reuse
       recognitionRef.current = null;
     }
-
-    // Get pause metrics
-    pauseTrackerRef.current?.stop();
-    const pauseMetrics = pauseTrackerRef.current?.getMetrics();
-
-    // Get audio analysis results
-    const audioAnalysis = audioExtractorRef.current?.stop() || AudioFeatureExtractor.createEmptyResult();
-    const prosodyMetrics = analyzeProsody(audioAnalysis);
 
     // Build final transcript from all segments
     const rawTranscript = finalSegmentsRef.current.join(' ').trim();
     
     console.log('[SpeechAnalysis] Final transcript:', rawTranscript.substring(0, 100));
 
-    // Silence Safety Gate - RELAXED thresholds to reduce false positives
-    // Previous: silenceRatio > 0.95 && averageRms < 0.01 was too aggressive
-    // Now: Only discard if COMPLETELY silent (silenceRatio > 0.99) AND extremely low RMS
-    const isSilentAudio = audioAnalysis.silenceRatio > 0.99 && audioAnalysis.averageRms < 0.005;
-    if (isSilentAudio && rawTranscript.length > 0) {
-      console.warn('[SpeechAnalysis] Silent audio with text detected - possible hallucination, discarding');
-      return null;
-    }
-
-    // Also allow through if we have a meaningful transcript (15+ chars) even with high silence
-    // This handles pauses between sentences which can inflate silenceRatio
-    if (!rawTranscript || (rawTranscript.length < 3 && audioAnalysis.silenceRatio > 0.90)) {
+    // Check if we got any speech
+    if (!rawTranscript || rawTranscript.length < 3) {
       console.warn('[SpeechAnalysis] No meaningful speech detected');
       return null;
     }
 
-    // Calculate word confidences
-    const wordConfidences = wordTrackerRef.current?.getWordConfidences(rawTranscript) ||
-                            WordConfidenceTracker.createEmptyConfidences(rawTranscript);
-
     const durationMs = Date.now() - startTimeRef.current;
-
-    const fluencyMetrics = calculateFluency(
-      wordConfidences,
-      audioAnalysis,
-      prosodyMetrics,
-      durationMs
-    );
-
-    // Create cleaned transcript (remove fillers and repeats)
-    const cleanedTranscript = wordConfidences
-      .filter(w => !w.isFiller && !w.isRepeat)
-      .map(w => w.word)
-      .join(' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-    // Calculate clarity score
-    const avgConfidence = wordConfidences.length > 0
-      ? wordConfidences.reduce((sum, w) => sum + w.confidence, 0) / wordConfidences.length
-      : 0;
-
-    const overallClarityScore = Math.round(
-      (avgConfidence * 0.4) +
-      (fluencyMetrics.overallFluencyScore * 0.3) +
-      (prosodyMetrics.pitchVariation * 0.15) +
-      (prosodyMetrics.rhythmConsistency * 0.15)
-    );
 
     // Determine browser mode
     let browserMode: SpeechAnalysisResult['browserMode'] = 'other';
     if (browser.isEdge) browserMode = 'edge-natural';
     else if (browser.isChrome) browserMode = 'chrome-accent';
 
-    console.log(`[SpeechAnalysis] Complete. Duration: ${durationMs}ms, Words: ${wordConfidences.length}`);
+    console.log(`[SpeechAnalysis] Complete. Duration: ${durationMs}ms`);
 
     return {
       rawTranscript,
-      cleanedTranscript,
-      wordConfidences,
-      fluencyMetrics,
-      prosodyMetrics,
-      audioAnalysis,
       durationMs,
-      overallClarityScore,
-      ghostWords: [], // DEPRECATED: No longer used
-      pauseBreakdowns: pauseMetrics?.fluencyBreakdowns || 0,
       browserMode,
     };
   }, [stopWatchdog]);
@@ -577,15 +428,9 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
 
     setIsAnalyzing(false);
     isAnalyzingRef.current = false;
-    setCurrentRms(0);
 
     // Stop watchdog
     stopWatchdog();
-
-    if (rmsMonitorRef.current) {
-      clearInterval(rmsMonitorRef.current);
-      rmsMonitorRef.current = null;
-    }
 
     if (wakeLockRef.current) {
       wakeLockRef.current.release().catch(() => {});
@@ -600,31 +445,16 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
       }
       recognitionRef.current = null;
     }
-
-    if (audioExtractorRef.current) {
-      audioExtractorRef.current.stop();
-      audioExtractorRef.current = null;
-    }
-
-    pauseTrackerRef.current = null;
-    wordTrackerRef.current = null;
   }, [stopWatchdog]);
-
-  // Exports for backward compatibility and fluency calculations
-  const getEmptyFluencyMetrics = useCallback(() => createEmptyFluencyMetrics(), []);
-  const getEmptyProsodyMetrics = useCallback(() => createEmptyProsodyMetrics(), []);
 
   return {
     isAnalyzing,
     isSupported,
     error,
     interimTranscript,
-    currentRms,
     start,
     stop,
     abort,
-    getEmptyFluencyMetrics,
-    getEmptyProsodyMetrics,
   };
 }
 
@@ -634,15 +464,7 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
 export function createEmptySpeechAnalysisResult(): SpeechAnalysisResult {
   return {
     rawTranscript: '',
-    cleanedTranscript: '',
-    wordConfidences: [],
-    fluencyMetrics: createEmptyFluencyMetrics(),
-    prosodyMetrics: createEmptyProsodyMetrics(),
-    audioAnalysis: AudioFeatureExtractor.createEmptyResult(),
     durationMs: 0,
-    overallClarityScore: 0,
-    ghostWords: [],
-    pauseBreakdowns: 0,
     browserMode: 'other',
   };
 }

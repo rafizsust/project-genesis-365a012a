@@ -186,48 +186,15 @@ export default function AIPracticeSpeakingTest() {
 
   // Speech analysis state for text-based evaluation
   const [segmentAnalyses, setSegmentAnalyses] = useState<Record<string, SpeechAnalysisResult>>({});
-  // REMOVED: currentAnalysis and showInstantFeedback - confidence scores are now integrated into evaluation report only
-  const [isAnalyzingFeedback, setIsAnalyzingFeedback] = useState(false); // Show "Analyzing..." state after recording
-  const [showLowVolumeWarning, setShowLowVolumeWarning] = useState(false); // Real-time volume warning
 
   // Advanced speech analysis hook
-  // Note: Live transcript is captured for text-based evaluation but NOT displayed during test
-  // to avoid confusing test takers. Confidence scores are shown in the evaluation report.
-  // Language is dynamically set based on user's accent selection for ~30% accuracy improvement
+  // Language is dynamically set based on user's accent selection for better accuracy
   const speechAnalysis = useAdvancedSpeechAnalysis({
     language: selectedAccent,
     onInterimResult: () => {
       // Transcript is captured internally for evaluation - no UI display during test
-      // Word confidence data will be shown in the Confidence tab after evaluation
     },
   });
-
-  // Track low volume duration for warning
-  const lowVolumeStartRef = useRef<number | null>(null);
-  const LOW_VOLUME_THRESHOLD = 0.015;
-  const LOW_VOLUME_DURATION_MS = 3000;
-
-  // Monitor volume during recording for low volume warning
-  useEffect(() => {
-    if (!isRecording) {
-      setShowLowVolumeWarning(false);
-      lowVolumeStartRef.current = null;
-      return;
-    }
-
-    const rms = speechAnalysis.currentRms;
-    
-    if (rms < LOW_VOLUME_THRESHOLD && rms > 0) {
-      if (lowVolumeStartRef.current === null) {
-        lowVolumeStartRef.current = Date.now();
-      } else if (Date.now() - lowVolumeStartRef.current > LOW_VOLUME_DURATION_MS) {
-        setShowLowVolumeWarning(true);
-      }
-    } else {
-      lowVolumeStartRef.current = null;
-      setShowLowVolumeWarning(false);
-    }
-  }, [isRecording, speechAnalysis.currentRms]);
 
   // Persist segment analyses to sessionStorage for crash recovery
   const SEGMENT_ANALYSES_KEY = `speaking_analyses_${testId}`;
@@ -235,18 +202,13 @@ export default function AIPracticeSpeakingTest() {
   useEffect(() => {
     if (Object.keys(segmentAnalyses).length > 0 && testId) {
       try {
-        // Store only essential data (exclude large audio analysis frames)
-        const serializableAnalyses: Record<string, any> = {};
+        // Store only essential data
+        const serializableAnalyses: Record<string, unknown> = {};
         for (const [key, analysis] of Object.entries(segmentAnalyses)) {
           serializableAnalyses[key] = {
             rawTranscript: analysis.rawTranscript,
-            cleanedTranscript: analysis.cleanedTranscript,
-            wordConfidences: analysis.wordConfidences,
-            fluencyMetrics: analysis.fluencyMetrics,
-            prosodyMetrics: analysis.prosodyMetrics,
             durationMs: analysis.durationMs,
-            overallClarityScore: analysis.overallClarityScore,
-            // Exclude audioAnalysis.frames to save space
+            browserMode: analysis.browserMode,
           };
         }
         sessionStorage.setItem(SEGMENT_ANALYSES_KEY, JSON.stringify(serializableAnalyses));
@@ -598,25 +560,14 @@ export default function AIPracticeSpeakingTest() {
       } else if (key) {
         console.log(`[SpeakingTest] Speech analysis for ${key}:`, {
           rawTranscript: analysis.rawTranscript.slice(0, 100),
-          wordCount: analysis.wordConfidences.length,
-          fluencyScore: analysis.fluencyMetrics.overallFluencyScore,
-          clarityScore: analysis.overallClarityScore,
+          durationMs: analysis.durationMs,
         });
-        
-        // Show "Analyzing..." state briefly to indicate processing
-        setIsAnalyzingFeedback(true);
 
-        // IMPORTANT: Persist analysis immediately so submission always includes transcripts/confidence
+        // IMPORTANT: Persist analysis immediately so submission always includes transcripts
         setSegmentAnalyses(prev => ({
           ...prev,
           [key]: analysis,
         }));
-
-        // Keep the short delay purely for UI feel
-        const analysisDelay = 1000 + Math.random() * 1000;
-        setTimeout(() => {
-          setIsAnalyzingFeedback(false);
-        }, analysisDelay);
       }
     }
 
@@ -1208,16 +1159,8 @@ export default function AIPracticeSpeakingTest() {
       for (const [key, analysis] of Object.entries(segmentAnalyses)) {
         transcriptData[key] = {
           rawTranscript: analysis.rawTranscript,
-          cleanedTranscript: analysis.cleanedTranscript,
-          wordConfidences: analysis.wordConfidences,
-          fluencyMetrics: analysis.fluencyMetrics,
-          prosodyMetrics: {
-            pitchVariation: analysis.prosodyMetrics.pitchVariation,
-            stressEventCount: analysis.prosodyMetrics.stressEventCount,
-            rhythmConsistency: analysis.prosodyMetrics.rhythmConsistency,
-          },
           durationMs: analysis.durationMs,
-          overallClarityScore: analysis.overallClarityScore,
+          browserMode: analysis.browserMode,
         };
       }
 
@@ -2092,33 +2035,6 @@ export default function AIPracticeSpeakingTest() {
                 Stop & Next
               </Button>
             </div>
-          </div>
-        )}
-
-        {/* Analyzing feedback state - shown during analysis delay */}
-        {isAnalyzingFeedback && !isRecording && (
-          <div className="mb-4 md:mb-6 animate-in fade-in duration-300">
-            <Card className="border-primary/30 bg-primary/5">
-              <CardContent className="p-4 md:p-6 flex items-center justify-center gap-3">
-                <Loader2 className="w-5 h-5 text-primary animate-spin" />
-                <span className="text-base font-medium text-primary">Analyzing your response...</span>
-              </CardContent>
-            </Card>
-          </div>
-        )}
-
-        {/* Confidence score feedback removed - now integrated into evaluation report */}
-
-        {/* Low Volume Warning - shown during recording when mic input is low */}
-        {isRecording && showLowVolumeWarning && (
-          <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-40 animate-in fade-in slide-in-from-bottom-2 duration-200">
-            <Badge 
-              variant="destructive" 
-              className="py-2 px-4 text-sm font-medium shadow-lg flex items-center gap-2"
-            >
-              <Mic className="w-4 h-4" />
-              Microphone input low - Speak up!
-            </Badge>
           </div>
         )}
 

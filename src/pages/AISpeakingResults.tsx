@@ -118,7 +118,6 @@ interface SpeakingResult {
     by_part: Record<number, string>;
     by_question?: Record<number, TranscriptEntry[]>;
   };
-  confidence_transcripts?: Record<string, ConfidenceTranscriptData>;
   created_at: string;
 }
 
@@ -256,206 +255,7 @@ function normalizeEvaluationReport(raw: any): EvaluationReport {
   };
 }
 
-// Confidence Analysis Tab Component - displays word confidence and fluency metrics
-interface ConfidenceTranscriptData {
-  rawTranscript?: string;
-  cleanedTranscript?: string;
-  wordConfidences?: Array<{ word: string; confidence: number; isFiller?: boolean; isRepeat?: boolean }>;
-  fluencyMetrics?: {
-    wordsPerMinute?: number;
-    pauseCount?: number;
-    fillerCount?: number;
-    fillerRatio?: number;
-    overallFluencyScore?: number;
-  };
-  prosodyMetrics?: {
-    pitchVariation?: number;
-    rhythmConsistency?: number;
-  };
-  durationMs?: number;
-  overallClarityScore?: number;
-}
-
-function ConfidenceAnalysisTab({ transcripts }: { transcripts?: Record<string, ConfidenceTranscriptData> }) {
-  if (!transcripts || Object.keys(transcripts).length === 0) {
-    return (
-      <Card>
-        <CardContent className="py-8 text-center">
-          <AlertCircle className="w-8 h-8 mx-auto mb-3 text-muted-foreground" />
-          <p className="text-muted-foreground">
-            Word confidence data is not available for this test.
-          </p>
-          <p className="text-xs text-muted-foreground mt-2">
-            This feature requires browser-based speech recognition during the test which captures per-word confidence scores.
-          </p>
-        </CardContent>
-      </Card>
-    );
-  }
-
-  // Color function matching the reference screenshot - inline text style
-  const getConfidenceTextColor = (confidence: number, isFiller?: boolean): string => {
-    if (isFiller) return 'text-red-600 dark:text-red-400';
-    if (confidence >= 95) return 'text-green-700 dark:text-green-400';
-    if (confidence >= 85) return 'text-green-600 dark:text-green-500';
-    if (confidence >= 70) return 'text-yellow-600 dark:text-yellow-400';
-    if (confidence >= 50) return 'text-orange-600 dark:text-orange-400';
-    return 'text-red-600 dark:text-red-400';
-  };
-
-  const getConfidencePercentColor = (confidence: number, isFiller?: boolean): string => {
-    if (isFiller) return 'text-red-500 dark:text-red-400';
-    if (confidence >= 95) return 'text-green-600 dark:text-green-400';
-    if (confidence >= 85) return 'text-green-500 dark:text-green-500';
-    if (confidence >= 70) return 'text-yellow-500 dark:text-yellow-400';
-    if (confidence >= 50) return 'text-orange-500 dark:text-orange-400';
-    return 'text-red-500 dark:text-red-400';
-  };
-
-  const sortedSegments = Object.entries(transcripts).sort(([a], [b]) => {
-    const partA = parseInt(a.match(/part(\d)/)?.[1] || '0');
-    const partB = parseInt(b.match(/part(\d)/)?.[1] || '0');
-    return partA - partB;
-  });
-
-  return (
-    <div className="space-y-4">
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Target className="w-5 h-5 text-primary" />
-            Word Confidence Analysis
-          </CardTitle>
-          <CardDescription>
-            Actual audio transcript (What native speakers are likely to hear)
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-6">
-          {sortedSegments.map(([segmentKey, data]) => {
-            const partMatch = segmentKey.match(/part(\d)/);
-            const partNum = partMatch ? parseInt(partMatch[1]) : 0;
-            
-            return (
-              <div key={segmentKey} className="border rounded-lg p-4 space-y-4">
-                <div className="flex items-center justify-between flex-wrap gap-2">
-                  <Badge variant="outline">Part {partNum}</Badge>
-                  <div className="flex gap-2 flex-wrap">
-                    {data.fluencyMetrics?.wordsPerMinute && (
-                      <Badge variant="secondary" className="text-xs">
-                        {data.fluencyMetrics.wordsPerMinute} WPM
-                      </Badge>
-                    )}
-                    {data.overallClarityScore !== undefined && (
-                      <Badge variant="secondary" className="text-xs">
-                        {data.overallClarityScore}% Clarity
-                      </Badge>
-                    )}
-                    {data.fluencyMetrics?.pauseCount !== undefined && (
-                      <Badge variant="secondary" className="text-xs">
-                        {data.fluencyMetrics.pauseCount} pauses
-                      </Badge>
-                    )}
-                    {(data.fluencyMetrics?.fillerCount ?? 0) > 0 && (
-                      <Badge variant="outline" className="text-xs text-warning">
-                        {data.fluencyMetrics?.fillerCount} fillers
-                      </Badge>
-                    )}
-                  </div>
-                </div>
-
-                {/* Word Confidence Display - Inline text style like reference */}
-                {data.wordConfidences && data.wordConfidences.length > 0 && (
-                  <div className="leading-relaxed">
-                    {data.wordConfidences.map((w, idx) => (
-                      <span
-                        key={idx}
-                        className={cn(
-                          "inline-block text-center mx-0.5 mb-2",
-                          w.isFiller && "italic",
-                          w.isRepeat && "line-through opacity-60"
-                        )}
-                        title={`${w.confidence}% confidence${w.isFiller ? ' (filler)' : ''}${w.isRepeat ? ' (repeat)' : ''}`}
-                      >
-                        <span className={cn("block text-[10px] font-normal", getConfidencePercentColor(w.confidence, w.isFiller))}>
-                          {w.confidence}%
-                        </span>
-                        <span className={cn("font-semibold text-sm", getConfidenceTextColor(w.confidence, w.isFiller))}>
-                          {w.word}
-                        </span>
-                      </span>
-                    ))}
-                  </div>
-                )}
-
-                {/* What you said - Raw Transcript */}
-                {data.rawTranscript && (
-                  <div className="space-y-2 pt-2 border-t">
-                    <div>
-                      <p className="text-xs text-muted-foreground mb-1 underline">What you said:</p>
-                      <p className="text-sm">{data.rawTranscript}</p>
-                    </div>
-                  </div>
-                )}
-
-                {/* Prosody Metrics */}
-                {data.prosodyMetrics && (
-                  <div className="flex gap-4 text-xs text-muted-foreground pt-2">
-                    {data.prosodyMetrics.pitchVariation !== undefined && (
-                      <span>Pitch Variation: {data.prosodyMetrics.pitchVariation.toFixed(0)}%</span>
-                    )}
-                    {data.prosodyMetrics.rhythmConsistency !== undefined && (
-                      <span>Rhythm: {data.prosodyMetrics.rhythmConsistency.toFixed(0)}%</span>
-                    )}
-                    {data.durationMs && (
-                      <span>Duration: {Math.round(data.durationMs / 1000)}s</span>
-                    )}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-
-          {/* Disclaimer */}
-          <div className="flex items-start gap-2 p-3 bg-muted/50 rounded-lg text-xs text-muted-foreground">
-            <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
-            <p>
-              <strong>Note:</strong> This analysis uses browser-based speech recognition and is for practice feedback only. 
-              It is NOT an official IELTS pronunciation score. Accuracy may vary based on audio quality and accent.
-            </p>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Confidence Legend - Updated to match inline style */}
-      <Card>
-        <CardContent className="py-3">
-          <div className="flex flex-wrap gap-4 justify-center text-xs">
-            <span className="flex items-center gap-1.5">
-              <span className="font-semibold text-green-700 dark:text-green-400">word</span>
-              <span className="text-muted-foreground">95-100%</span>
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="font-semibold text-green-600 dark:text-green-500">word</span>
-              <span className="text-muted-foreground">85-94%</span>
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="font-semibold text-yellow-600 dark:text-yellow-400">word</span>
-              <span className="text-muted-foreground">70-84%</span>
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="font-semibold text-orange-600 dark:text-orange-400">word</span>
-              <span className="text-muted-foreground">50-69%</span>
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="font-semibold text-red-600 dark:text-red-400">word</span>
-              <span className="text-muted-foreground">&lt;50%</span>
-            </span>
-          </div>
-        </CardContent>
-      </Card>
-    </div>
-  );
-}
+// ConfidenceAnalysisTab removed - confidence tracking is no longer used
 
 function normalizeSpeakingAnswers(raw: any): {
   audioUrls: Record<string, string>;
@@ -598,9 +398,7 @@ export default function AISpeakingResults() {
       }
     }
 
-    const confidenceTranscripts = (data.answers && typeof data.answers === 'object')
-      ? ((data.answers as any).transcripts as Record<string, any> | undefined)
-      : undefined;
+    // confidenceTranscripts removed - no longer used
 
     setResult({
       id: data.id,
@@ -612,7 +410,6 @@ export default function AISpeakingResults() {
         by_part: transcriptsByPart,
         by_question: transcriptsByQuestion,
       },
-      confidence_transcripts: confidenceTranscripts,
       created_at: data.completed_at,
     });
     setLoading(false);
@@ -863,10 +660,9 @@ export default function AISpeakingResults() {
           </Card>
 
           <Tabs defaultValue="criteria" className="mb-6">
-            <TabsList className="w-full overflow-x-auto flex md:grid md:grid-cols-7 h-auto p-1">
+            <TabsList className="w-full overflow-x-auto flex md:grid md:grid-cols-6 h-auto p-1">
               <TabsTrigger value="criteria" className="text-xs md:text-sm px-2 md:px-3 py-1.5 whitespace-nowrap">Criteria</TabsTrigger>
               <TabsTrigger value="transcript" className="text-xs md:text-sm px-2 md:px-3 py-1.5 whitespace-nowrap">Transcript</TabsTrigger>
-              <TabsTrigger value="confidence" className="text-xs md:text-sm px-2 md:px-3 py-1.5 whitespace-nowrap">Confidence</TabsTrigger>
               <TabsTrigger value="model" className="text-xs md:text-sm px-2 md:px-3 py-1.5 whitespace-nowrap">Model</TabsTrigger>
               <TabsTrigger value="lexical" className="text-xs md:text-sm px-2 md:px-3 py-1.5 whitespace-nowrap">Lexical</TabsTrigger>
               <TabsTrigger value="parts" className="text-xs md:text-sm px-2 md:px-3 py-1.5 whitespace-nowrap">Parts</TabsTrigger>
@@ -947,10 +743,6 @@ export default function AISpeakingResults() {
               />
             </TabsContent>
 
-            {/* Confidence Analysis Tab - Word Confidence & Fluency Metrics */}
-            <TabsContent value="confidence" className="mt-4 md:mt-6">
-              <ConfidenceAnalysisTab transcripts={result?.confidence_transcripts} />
-            </TabsContent>
 
             {/* Candidate Transcript with Audio Playback */}
             <TabsContent value="transcript" className="mt-6">
@@ -1012,15 +804,7 @@ export default function AISpeakingResults() {
                         }
                       }
 
-                      // Fallback to confidence_transcripts (from browser STT) if no transcript found
-                      if (!transcript && result.confidence_transcripts) {
-                        const ct = result.confidence_transcripts[key] || 
-                                   result.confidence_transcripts[key.toLowerCase()] ||
-                                   result.confidence_transcripts[key.toUpperCase()];
-                        if (ct) {
-                          transcript = ct.rawTranscript || ct.cleanedTranscript || '';
-                        }
-                      }
+                      // No fallback to confidence_transcripts - removed
 
                       // Fallback: extract question number from key pattern if not found
                       if (!questionNumber) {
