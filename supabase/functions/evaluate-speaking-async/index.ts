@@ -34,6 +34,7 @@ interface EvaluationRequest {
   fluencyFlag?: boolean;
   retryJobId?: string;
   cancelExisting?: boolean; // If true, cancel existing jobs before creating new one
+  evaluationMode?: 'basic' | 'accuracy'; // 'basic' = text-based, 'accuracy' = audio-based
   // Text-based evaluation data (from browser speech analysis)
   transcripts?: Record<string, {
     rawTranscript: string;
@@ -74,12 +75,20 @@ serve(async (req) => {
     }
 
     const body: EvaluationRequest = await req.json();
-    const { testId, filePaths, durations, topic, difficulty, fluencyFlag, retryJobId, cancelExisting, transcripts } = body;
+    const { testId, filePaths, durations, topic, difficulty, fluencyFlag, retryJobId, cancelExisting, transcripts, evaluationMode } = body;
 
-    // Check if text-based evaluation is available
+    // Determine evaluation path based on mode
+    // 'accuracy' mode forces audio-based evaluation (uses more AI tokens but more accurate)
+    // 'basic' mode uses text-based evaluation if transcripts are available
+    const useAudioEvaluation = evaluationMode === 'accuracy';
     const hasTranscripts = transcripts && Object.keys(transcripts).length > 0;
-    if (hasTranscripts) {
+    
+    console.log(`[evaluate-speaking-async] Mode: ${evaluationMode || 'basic'}, hasTranscripts: ${hasTranscripts}, useAudioEvaluation: ${useAudioEvaluation}`);
+    
+    if (hasTranscripts && !useAudioEvaluation) {
       console.log(`[evaluate-speaking-async] Text-based evaluation available with ${Object.keys(transcripts).length} segments`);
+    } else if (useAudioEvaluation) {
+      console.log(`[evaluate-speaking-async] Audio-based evaluation requested (accuracy mode)`);
     }
 
     if (!testId || !filePaths || Object.keys(filePaths).length === 0) {
@@ -172,14 +181,22 @@ serve(async (req) => {
       }
 
       // Create new job record with staged processing
-      // If transcripts are available, we can skip audio upload and go straight to text-based eval
+      // - 'accuracy' mode: always use audio-based evaluation (pending_upload)
+      // - 'basic' mode with transcripts: use text-based evaluation (pending_text_eval)
+      // - 'basic' mode without transcripts: fall back to audio evaluation (pending_upload)
+      const stage = useAudioEvaluation 
+        ? 'pending_upload'  // Force audio upload for accuracy mode
+        : (hasTranscripts ? 'pending_text_eval' : 'pending_upload');
+      
+      console.log(`[evaluate-speaking-async] Creating job with stage: ${stage}`);
+      
       const { data: newJob, error: jobError } = await supabaseService
         .from('speaking_evaluation_jobs')
         .insert({
           user_id: user.id,
           test_id: testId,
           status: 'pending',
-          stage: hasTranscripts ? 'pending_text_eval' : 'pending_upload',
+          stage,
           file_paths: filePaths,
           durations: durations || {},
           topic,
@@ -187,8 +204,9 @@ serve(async (req) => {
           fluency_flag: fluencyFlag || false,
           max_retries: 5,
           retry_count: 0,
-          // Store transcripts for text-based evaluation (much cheaper than audio)
-          partial_results: hasTranscripts ? { transcripts } : null,
+          // Store transcripts for text-based evaluation (only for basic mode)
+          // For accuracy mode, transcripts are intentionally not stored to force audio evaluation
+          partial_results: (!useAudioEvaluation && hasTranscripts) ? { transcripts, evaluationMode } : { evaluationMode },
         })
         .select()
         .single();

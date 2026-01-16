@@ -3,6 +3,7 @@ export { SpeakingTestControls } from './SpeakingTestControls';
 export { AIExaminerAvatar } from './AIExaminerAvatar';
 export { SpeakingExamStateMachine } from './SpeakingExamStateMachine';
 export { AudioLevelIndicator } from './AudioLevelIndicator';
+export { AudioWaveformIndicator } from './AudioWaveformIndicator';
 export { AudioVolumeControl } from './AudioVolumeControl';
 export { MicrophoneTest, ACCENT_OPTIONS as MIC_TEST_ACCENT_OPTIONS } from './MicrophoneTest';
 export type { AccentCode as MicTestAccentCode } from './MicrophoneTest';

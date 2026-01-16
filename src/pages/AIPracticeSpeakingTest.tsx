@@ -36,11 +36,10 @@ import { useAudioPreloader } from '@/hooks/useAudioPreloader';
 import { SubmissionErrorState } from '@/components/common/SubmissionErrorState';
 import { ApiErrorDescriptor } from '@/lib/apiErrors';
 import { cn } from '@/lib/utils';
-import { AudioLevelIndicator, AudioVolumeControl } from '@/components/speaking';
+import { AudioLevelIndicator, AudioVolumeControl, AudioWaveformIndicator } from '@/components/speaking';
 import { useFullscreenTest } from '@/hooks/useFullscreenTest';
 import { compressAudio } from '@/utils/audioCompressor';
 import { useAdvancedSpeechAnalysis, SpeechAnalysisResult } from '@/hooks/useAdvancedSpeechAnalysis';
-// InstantSpeechFeedback import removed - confidence now shown in evaluation report only
 import { BrowserCompatibilityCheck } from '@/components/speaking/BrowserCompatibilityCheck';
 
 // IELTS Official Timings
@@ -2047,12 +2046,12 @@ export default function AIPracticeSpeakingTest() {
                 <Mic className="w-8 h-8 md:w-10 md:h-10 text-destructive" />
               </div>
             </div>
-            {/* Audio level bars */}
-            <AudioLevelIndicator 
+            {/* Real-time audio waveform visualization */}
+            <AudioWaveformIndicator 
               stream={mediaRecorderRef.current?.stream || null}
               isActive={isRecording}
-              variant="bars"
-              className="mt-2"
+              barCount={24}
+              className="mt-2 w-full max-w-xs"
             />
             <p className="text-sm md:text-base text-muted-foreground">Recording your response...</p>
             <p className="text-xs md:text-sm text-muted-foreground">Time remaining: {formatTime(timeLeft)}</p>
