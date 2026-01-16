@@ -664,7 +664,11 @@ async function processTextBasedEvaluation(job: any, supabaseService: any, appEnc
           
           const model = genAI.getGenerativeModel({
             model: modelName,
-            generationConfig: { temperature: 0.3, maxOutputTokens: 8000 },
+            generationConfig: { 
+              temperature: 0.3, 
+              maxOutputTokens: 8000,
+              responseMimeType: 'application/json', // Force JSON output
+            },
           });
 
           const response = await model.generateContent(prompt);

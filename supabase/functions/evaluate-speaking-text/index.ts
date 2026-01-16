@@ -21,7 +21,7 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
-const GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-2.5-flash'];
+const GEMINI_MODELS = ['gemini-2.5-flash']; // Only use 2.5-flash for speaking evaluation
 
 interface TranscriptData {
   rawTranscript: string;
