@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useNavigate, useLocation } from 'react-router-dom'; // Import useLocation
+import { useNavigate, useLocation } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -13,6 +13,38 @@ const emailSchema = z.string().email('Please enter a valid email address');
 const passwordSchema = z.string().min(6, 'Password must be at least 6 characters');
 
 const TERMS_ACCEPTED_KEY = 'ieltsai_terms_accepted';
+const NOTIFICATION_REQUESTED_KEY = 'ieltsai_notification_requested';
+
+// Request notification permission on login (only once per session)
+const requestNotificationPermissionOnLogin = () => {
+  // Check if we've already requested in this browser
+  if (localStorage.getItem(NOTIFICATION_REQUESTED_KEY) === 'true') {
+    return;
+  }
+  
+  // Check if browser supports notifications
+  if (!('Notification' in window)) {
+    return;
+  }
+  
+  // If already granted or denied, don't ask again
+  if (Notification.permission !== 'default') {
+    localStorage.setItem(NOTIFICATION_REQUESTED_KEY, 'true');
+    return;
+  }
+  
+  // Request permission after a short delay (don't interrupt login flow)
+  setTimeout(() => {
+    Notification.requestPermission().then((permission) => {
+      localStorage.setItem(NOTIFICATION_REQUESTED_KEY, 'true');
+      if (permission === 'granted') {
+        console.log('[Auth] Notification permission granted on login');
+      }
+    }).catch((err) => {
+      console.warn('[Auth] Failed to request notification permission:', err);
+    });
+  }, 2000);
+};
 
 const Auth = () => {
   const [isLogin, setIsLogin] = useState(true);
@@ -91,6 +123,8 @@ const Auth = () => {
           }
         } else {
           toast.success('Welcome back!');
+          // Request notification permission on successful login
+          requestNotificationPermissionOnLogin();
           // Redirection handled by useEffect
         }
       } else {
