@@ -124,10 +124,10 @@ IMPORTANT OUTPUT LIMITS:
 - lexical_upgrades: maximum 5 total
 - improvement_priorities: REQUIRED 2-3 specific priorities based on lowest scoring criteria
 
-MODEL ANSWER WORD COUNTS (REDUCED):
-- Part 1: ~50 words (natural, conversational)
-- Part 2: ~150 words (covers key cue card points)
-- Part 3: ~80 words (analytical with example)
+MODEL ANSWER WORD COUNTS (STRICT - MUST FOLLOW):
+- Part 1: 40-50 words EXACTLY (natural, conversational - do NOT exceed)
+- Part 2: 170-190 words EXACTLY (covers all cue card points with examples - this is the long turn)
+- Part 3: 70-90 words EXACTLY (analytical with one supporting example)
 
 ══════════════════════════════════════════════════════════════
 WEAKNESS FORMAT (IMPORTANT)

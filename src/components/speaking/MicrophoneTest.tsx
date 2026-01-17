@@ -417,7 +417,7 @@ export function MicrophoneTest({ onTestComplete, onBack, initialAccent, initialE
             <RadioGroupItem value="basic" id="eval-basic" className="mt-0.5" />
             <div className="flex-1">
               <label htmlFor="eval-basic" className="font-medium cursor-pointer">
-                Basic Evaluation <span className="text-xs text-muted-foreground font-normal">(frequent errors)</span>
+                Basic Evaluation <span className="text-xs text-destructive/80 font-normal">(frequent errors)</span>
               </label>
               <p className="text-xs text-muted-foreground mt-0.5">
                 Uses browser speech recognition for evaluation. Faster and uses less AI tokens.

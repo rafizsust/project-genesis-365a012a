@@ -1048,23 +1048,23 @@ export default function AISpeakingResults() {
                                   </tr>
                                 </thead>
                                 <tbody>
-                                  {report.recognition_corrections.map((correction, i) => (
-                                    <tr key={i} className="border-b last:border-0">
-                                      <td className="py-3 px-2">
-                                        <Badge variant="outline" className="bg-warning/10 text-warning-foreground border-warning/30">
-                                          {correction.captured}
-                                        </Badge>
-                                      </td>
-                                      <td className="py-3 px-2">
-                                        <Badge variant="outline" className="bg-primary/10 text-primary border-primary/30">
-                                          {correction.intended}
-                                        </Badge>
-                                      </td>
-                                      <td className="py-3 px-2 text-muted-foreground italic hidden md:table-cell">
-                                        "{correction.context}"
-                                      </td>
-                                    </tr>
-                                  ))}
+                                                {report.recognition_corrections.map((correction, i) => (
+                                                    <tr key={i} className="border-b last:border-0">
+                                                      <td className="py-3 px-2 max-w-[140px] md:max-w-[200px]">
+                                                        <Badge variant="outline" className="bg-warning/10 text-warning-foreground border-warning/30 whitespace-normal break-words text-left inline-block max-w-full">
+                                                          {correction.captured}
+                                                        </Badge>
+                                                      </td>
+                                                      <td className="py-3 px-2 max-w-[140px] md:max-w-[200px]">
+                                                        <Badge variant="outline" className="bg-primary/10 text-primary border-primary/30 whitespace-normal break-words text-left inline-block max-w-full">
+                                                          {correction.intended}
+                                                        </Badge>
+                                                      </td>
+                                                      <td className="py-3 px-2 text-muted-foreground italic hidden md:table-cell max-w-[250px]">
+                                                        <span className="line-clamp-3 break-words">"{correction.context}"</span>
+                                                      </td>
+                                                    </tr>
+                                                  ))}
                                 </tbody>
                               </table>
                             </div>
@@ -1125,26 +1125,26 @@ export default function AISpeakingResults() {
                                 <tbody>
                                   {upgrades.map((upgrade, i) => (
                                     <tr key={i} className="border-b last:border-0">
-                                      <td className="py-3 px-2">
-                                        <Badge variant="outline" className="bg-muted text-foreground">
+                                      <td className="py-3 px-2 max-w-[140px] md:max-w-[200px]">
+                                        <Badge variant="outline" className="bg-muted text-foreground whitespace-normal break-words text-left inline-block max-w-full">
                                           {upgrade.original}
                                         </Badge>
                                       </td>
-                                      <td className="py-3 px-2">
-                                        <div className="flex items-center gap-2">
-                                          <Badge variant="outline" className="bg-success/10 text-success">
+                                      <td className="py-3 px-2 max-w-[160px] md:max-w-[220px]">
+                                        <div className="flex items-center gap-2 flex-wrap">
+                                          <Badge variant="outline" className="bg-success/10 text-success whitespace-normal break-words text-left inline-block max-w-full">
                                             {upgrade.upgraded}
                                           </Badge>
                                           <AddToFlashcardButton 
-                                            word={upgrade.upgraded} 
-                                            meaning={`${targetBandLabel} alternative for "${upgrade.original}"`}
+                                            word={upgrade.original} 
+                                            meaning={upgrade.upgraded}
                                             example={upgrade.context}
                                             variant="icon"
                                           />
                                         </div>
                                       </td>
-                                      <td className="py-3 px-2 text-muted-foreground italic hidden md:table-cell">
-                                        "{upgrade.context}"
+                                      <td className="py-3 px-2 text-muted-foreground italic hidden md:table-cell max-w-[250px]">
+                                        <span className="line-clamp-3 break-words">"{upgrade.context}"</span>
                                       </td>
                                     </tr>
                                   ))}

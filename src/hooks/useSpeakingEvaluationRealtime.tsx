@@ -2,6 +2,7 @@ import { useEffect, useCallback, useState, useRef } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
 import { useNavigate } from 'react-router-dom';
+import { playCompletionSound } from '@/lib/sounds';
 
 interface EvaluationJob {
   id: string;
@@ -129,6 +130,9 @@ export function useSpeakingEvaluationRealtime({
         const jobCompletedRecently = job.completed_at && (Date.now() - new Date(job.completed_at).getTime()) < 30000; // Within 30 seconds
         
         if (!wasAlreadyCompleted || jobCompletedRecently) {
+          // Play notification sound to alert user
+          playCompletionSound();
+          
           toastRef.current({
             title: 'Evaluation Complete!',
             description: 'Your speaking test results are ready.',

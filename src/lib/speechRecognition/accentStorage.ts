@@ -6,24 +6,33 @@
 
 const STORAGE_KEY = 'ielts_preferred_accent';
 const AUTO_DETECTED_KEY = 'ielts_accent_auto_detected';
-const DEFAULT_ACCENT = 'en-GB';
+// Default to Indian English as it's most common for IELTS test takers
+const DEFAULT_ACCENT = 'en-IN';
 
 // Map timezones/countries to recommended accents
 const TIMEZONE_TO_ACCENT: Record<string, string> = {
   // South Asian region -> Indian English
   'Asia/Kolkata': 'en-IN',
-  'Asia/Dhaka': 'en-IN',
+  'Asia/Dhaka': 'en-IN', // Bangladesh -> Indian English
   'Asia/Karachi': 'en-IN',
   'Asia/Colombo': 'en-IN',
   'Asia/Kathmandu': 'en-IN',
   'Asia/Thimphu': 'en-IN',
-  // Southeast Asia -> Singaporean English
-  'Asia/Singapore': 'en-SG',
-  'Asia/Kuala_Lumpur': 'en-SG',
-  'Asia/Bangkok': 'en-SG',
-  'Asia/Jakarta': 'en-SG',
-  'Asia/Manila': 'en-SG',
-  'Asia/Ho_Chi_Minh': 'en-SG',
+  'Asia/Yangon': 'en-IN', // Myanmar -> Indian English
+  'Asia/Rangoon': 'en-IN', // Myanmar alternative timezone
+  // Southeast Asia -> Indian English (most IELTS test takers from this region)
+  'Asia/Singapore': 'en-IN',
+  'Asia/Kuala_Lumpur': 'en-IN',
+  'Asia/Bangkok': 'en-IN',
+  'Asia/Jakarta': 'en-IN',
+  'Asia/Manila': 'en-IN',
+  'Asia/Ho_Chi_Minh': 'en-IN',
+  // East Asia -> Indian English (closer to IELTS test context)
+  'Asia/Shanghai': 'en-IN',
+  'Asia/Tokyo': 'en-IN',
+  'Asia/Seoul': 'en-IN',
+  'Asia/Hong_Kong': 'en-IN',
+  'Asia/Taipei': 'en-IN',
   // Australia/NZ
   'Australia/Sydney': 'en-AU',
   'Australia/Melbourne': 'en-AU',
@@ -56,19 +65,15 @@ export function detectAccentFromTimezone(): string | null {
     
     // Fallback: check timezone prefix for region-based detection
     if (timezone) {
-      if (timezone.startsWith('Asia/')) {
-        // Default South/Southeast Asia to Indian English
-        const southAsian = ['Dhaka', 'Kolkata', 'Karachi', 'Colombo', 'Kathmandu', 'Thimphu'];
-        if (southAsian.some(city => timezone.includes(city))) {
-          return 'en-IN';
-        }
-      }
+      // ALL Asian timezones default to Indian English (most common for IELTS)
+      if (timezone.startsWith('Asia/')) return 'en-IN';
       if (timezone.startsWith('Australia/')) return 'en-AU';
       if (timezone.startsWith('Europe/')) return 'en-GB';
       if (timezone.startsWith('America/')) return 'en-US';
     }
     
-    return null;
+    // Default to Indian English if no timezone detected
+    return 'en-IN';
   } catch {
     return null;
   }
