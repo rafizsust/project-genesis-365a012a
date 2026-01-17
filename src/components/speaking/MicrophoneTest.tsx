@@ -21,7 +21,7 @@ import {
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 
-import { detectBrowser, ACCENT_OPTIONS, getStoredAccent, setStoredAccent } from '@/lib/speechRecognition';
+import { detectBrowser, ACCENT_OPTIONS, getStoredAccent, setStoredAccent, getStoredAccentAsync } from '@/lib/speechRecognition';
 
 // Re-export for backwards compatibility
 export { ACCENT_OPTIONS };
@@ -94,10 +94,25 @@ export function MicrophoneTest({ onTestComplete, onBack, initialAccent, initialE
   // Accent selection - use stored accent or default based on browser
   const [selectedAccent, setSelectedAccent] = useState<AccentCode>(() => {
     if (initialAccent) return initialAccent;
-    // For Edge, accent doesn't matter but we still need a value
-    // For Chrome, use stored preference (which now auto-detects from timezone)
+    // Initial sync value - will be updated async
     return getStoredAccent() as AccentCode;
   });
+
+  // Try async geolocation-based detection on mount
+  useEffect(() => {
+    if (!initialAccent) {
+      getStoredAccentAsync().then((accent) => {
+        setSelectedAccent((current) => {
+          // Only update if different from current
+          if (accent && accent !== current) {
+            return accent as AccentCode;
+          }
+          return current;
+        });
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialAccent]);
 
   // Check if microphone permission is already granted on mount
   // Also check TTS support

@@ -1,15 +1,16 @@
 /**
  * Accent Preference Storage
  * Persists user's accent choice for Chrome
- * Includes auto-detection based on user location/timezone
+ * Includes auto-detection based on user location/timezone and geolocation
  */
 
 const STORAGE_KEY = 'ielts_preferred_accent';
 const AUTO_DETECTED_KEY = 'ielts_accent_auto_detected';
+const GEOLOCATION_CHECKED_KEY = 'ielts_geolocation_checked';
 // Default to Indian English as it's most common for IELTS test takers
 const DEFAULT_ACCENT = 'en-IN';
 
-// Map timezones/countries to recommended accents
+// Map timezones to recommended accents
 const TIMEZONE_TO_ACCENT: Record<string, string> = {
   // South Asian region -> Indian English
   'Asia/Kolkata': 'en-IN',
@@ -53,10 +54,210 @@ const TIMEZONE_TO_ACCENT: Record<string, string> = {
   'Africa/Johannesburg': 'en-ZA',
 };
 
+// Map country codes (ISO 3166-1 alpha-2) to accents
+const COUNTRY_TO_ACCENT: Record<string, string> = {
+  // South Asia -> Indian English
+  'IN': 'en-IN', // India
+  'BD': 'en-IN', // Bangladesh
+  'PK': 'en-IN', // Pakistan
+  'LK': 'en-IN', // Sri Lanka
+  'NP': 'en-IN', // Nepal
+  'BT': 'en-IN', // Bhutan
+  'MM': 'en-IN', // Myanmar
+  'AF': 'en-IN', // Afghanistan
+  // Southeast Asia -> Indian English
+  'SG': 'en-IN', // Singapore
+  'MY': 'en-IN', // Malaysia
+  'TH': 'en-IN', // Thailand
+  'ID': 'en-IN', // Indonesia
+  'PH': 'en-IN', // Philippines
+  'VN': 'en-IN', // Vietnam
+  'KH': 'en-IN', // Cambodia
+  'LA': 'en-IN', // Laos
+  // East Asia -> Indian English
+  'CN': 'en-IN', // China
+  'JP': 'en-IN', // Japan
+  'KR': 'en-IN', // South Korea
+  'HK': 'en-IN', // Hong Kong
+  'TW': 'en-IN', // Taiwan
+  'MO': 'en-IN', // Macau
+  // Middle East -> Indian English
+  'AE': 'en-IN', // UAE
+  'SA': 'en-IN', // Saudi Arabia
+  'QA': 'en-IN', // Qatar
+  'KW': 'en-IN', // Kuwait
+  'BH': 'en-IN', // Bahrain
+  'OM': 'en-IN', // Oman
+  'IR': 'en-IN', // Iran
+  'IQ': 'en-IN', // Iraq
+  // Australia/NZ
+  'AU': 'en-AU', // Australia
+  'NZ': 'en-NZ', // New Zealand
+  // UK/Ireland
+  'GB': 'en-GB', // United Kingdom
+  'IE': 'en-IE', // Ireland
+  // North America
+  'US': 'en-US', // United States
+  'CA': 'en-CA', // Canada
+  // South Africa
+  'ZA': 'en-ZA', // South Africa
+};
+
+// Approximate coordinate bounds for regions (lat/lng bounding boxes)
+interface RegionBounds {
+  minLat: number;
+  maxLat: number;
+  minLng: number;
+  maxLng: number;
+  accent: string;
+}
+
+const REGION_BOUNDS: RegionBounds[] = [
+  // South Asia (India, Bangladesh, Pakistan, Sri Lanka, Nepal, Bhutan)
+  { minLat: 5, maxLat: 37, minLng: 60, maxLng: 98, accent: 'en-IN' },
+  // Southeast Asia
+  { minLat: -11, maxLat: 28, minLng: 92, maxLng: 141, accent: 'en-IN' },
+  // East Asia (China, Japan, Korea)
+  { minLat: 18, maxLat: 54, minLng: 100, maxLng: 150, accent: 'en-IN' },
+  // Middle East
+  { minLat: 12, maxLat: 42, minLng: 25, maxLng: 63, accent: 'en-IN' },
+  // Australia
+  { minLat: -45, maxLat: -10, minLng: 110, maxLng: 155, accent: 'en-AU' },
+  // New Zealand
+  { minLat: -48, maxLat: -34, minLng: 165, maxLng: 180, accent: 'en-NZ' },
+  // UK & Ireland
+  { minLat: 49, maxLat: 61, minLng: -11, maxLng: 2, accent: 'en-GB' },
+  // USA (continental)
+  { minLat: 24, maxLat: 50, minLng: -125, maxLng: -66, accent: 'en-US' },
+  // Canada
+  { minLat: 41, maxLat: 84, minLng: -141, maxLng: -52, accent: 'en-CA' },
+  // South Africa
+  { minLat: -35, maxLat: -22, minLng: 16, maxLng: 33, accent: 'en-ZA' },
+];
+
+/**
+ * Detect accent based on coordinates using region bounds
+ */
+function detectAccentFromCoordinates(lat: number, lng: number): string | null {
+  for (const region of REGION_BOUNDS) {
+    if (
+      lat >= region.minLat &&
+      lat <= region.maxLat &&
+      lng >= region.minLng &&
+      lng <= region.maxLng
+    ) {
+      return region.accent;
+    }
+  }
+  return null;
+}
+
+/**
+ * Get country code from coordinates using a free reverse geocoding API
+ * Falls back to coordinate-based detection if API fails
+ */
+async function getCountryFromCoordinates(lat: number, lng: number): Promise<string | null> {
+  try {
+    // Use BigDataCloud free reverse geocoding API (no API key required)
+    const response = await fetch(
+      `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=en`,
+      { signal: AbortSignal.timeout(5000) }
+    );
+    
+    if (!response.ok) {
+      throw new Error('Geocoding API failed');
+    }
+    
+    const data = await response.json();
+    return data.countryCode || null;
+  } catch {
+    // Fall back to coordinate-based detection
+    return null;
+  }
+}
+
+/**
+ * Attempt to detect accent using browser Geolocation API
+ * Returns a promise that resolves to the detected accent or null
+ */
+export async function detectAccentFromGeolocation(): Promise<string | null> {
+  // Check if geolocation is supported
+  if (!navigator.geolocation) {
+    console.log('[AccentDetection] Geolocation not supported');
+    return null;
+  }
+
+  // Check if we've already tried geolocation
+  try {
+    if (localStorage.getItem(GEOLOCATION_CHECKED_KEY) === 'true') {
+      console.log('[AccentDetection] Geolocation already checked, skipping');
+      return null;
+    }
+  } catch {
+    // Ignore localStorage errors
+  }
+
+  return new Promise((resolve) => {
+    const timeoutId = setTimeout(() => {
+      console.log('[AccentDetection] Geolocation timed out');
+      markGeolocationChecked();
+      resolve(null);
+    }, 10000); // 10 second timeout
+
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        clearTimeout(timeoutId);
+        const { latitude, longitude } = position.coords;
+        console.log('[AccentDetection] Got coordinates:', latitude, longitude);
+
+        // Try to get country code first
+        const countryCode = await getCountryFromCoordinates(latitude, longitude);
+        if (countryCode && COUNTRY_TO_ACCENT[countryCode]) {
+          console.log('[AccentDetection] Detected country:', countryCode);
+          markGeolocationChecked();
+          resolve(COUNTRY_TO_ACCENT[countryCode]);
+          return;
+        }
+
+        // Fall back to coordinate-based detection
+        const accentFromCoords = detectAccentFromCoordinates(latitude, longitude);
+        if (accentFromCoords) {
+          console.log('[AccentDetection] Detected from coordinates:', accentFromCoords);
+          markGeolocationChecked();
+          resolve(accentFromCoords);
+          return;
+        }
+
+        markGeolocationChecked();
+        resolve(null);
+      },
+      (error) => {
+        clearTimeout(timeoutId);
+        console.log('[AccentDetection] Geolocation error:', error.message);
+        markGeolocationChecked();
+        resolve(null);
+      },
+      {
+        enableHighAccuracy: false,
+        timeout: 8000,
+        maximumAge: 86400000, // Cache for 24 hours
+      }
+    );
+  });
+}
+
+function markGeolocationChecked(): void {
+  try {
+    localStorage.setItem(GEOLOCATION_CHECKED_KEY, 'true');
+  } catch {
+    // Ignore
+  }
+}
+
 /**
  * Detect accent based on user's timezone
  */
-export function detectAccentFromTimezone(): string | null {
+export function detectAccentFromTimezone(): string {
   try {
     const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
     if (timezone && TIMEZONE_TO_ACCENT[timezone]) {
@@ -75,7 +276,7 @@ export function detectAccentFromTimezone(): string | null {
     // Default to Indian English if no timezone detected
     return 'en-IN';
   } catch {
-    return null;
+    return DEFAULT_ACCENT;
   }
 }
 
@@ -101,19 +302,52 @@ export function markAccentAutoDetected(): void {
   }
 }
 
+/**
+ * Get stored accent, falling back to auto-detection
+ */
 export function getStoredAccent(): string {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (stored) return stored;
     
-    // If no stored accent and not auto-detected before, try to detect
+    // If no stored accent and not auto-detected before, use timezone detection
+    // (Geolocation is async and handled separately)
     if (!hasAutoDetectedAccent()) {
       const detected = detectAccentFromTimezone();
-      if (detected) {
-        setStoredAccent(detected);
+      setStoredAccent(detected);
+      markAccentAutoDetected();
+      return detected;
+    }
+    
+    return DEFAULT_ACCENT;
+  } catch {
+    return DEFAULT_ACCENT;
+  }
+}
+
+/**
+ * Async version that tries geolocation first, then falls back to timezone
+ */
+export async function getStoredAccentAsync(): Promise<string> {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (stored) return stored;
+    
+    // If not auto-detected before, try geolocation first
+    if (!hasAutoDetectedAccent()) {
+      // Try geolocation (this will be skipped if already checked)
+      const geoAccent = await detectAccentFromGeolocation();
+      if (geoAccent) {
+        setStoredAccent(geoAccent);
         markAccentAutoDetected();
-        return detected;
+        return geoAccent;
       }
+      
+      // Fall back to timezone
+      const timezoneAccent = detectAccentFromTimezone();
+      setStoredAccent(timezoneAccent);
+      markAccentAutoDetected();
+      return timezoneAccent;
     }
     
     return DEFAULT_ACCENT;
@@ -134,6 +368,7 @@ export function clearStoredAccent(): void {
   try {
     localStorage.removeItem(STORAGE_KEY);
     localStorage.removeItem(AUTO_DETECTED_KEY);
+    localStorage.removeItem(GEOLOCATION_CHECKED_KEY);
   } catch {
     // Ignore
   }
