@@ -122,6 +122,11 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
   // Timing
   const sessionStartRef = useRef(0);
 
+  // CRITICAL: Use refs to always have the latest handler functions
+  // This prevents stale closure bugs where old handlers are attached to recognition
+  const handleEndRef = useRef<() => void>(() => {});
+  const flushInterimToFinalRef = useRef<() => boolean>(() => false);
+
   // Store the language for dynamic updates
   const languageRef = useRef(options.language || getStoredAccent());
 
@@ -251,6 +256,9 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
     return true;
   }, [options]);
 
+  // Keep flushInterimToFinalRef always pointing to latest function
+  flushInterimToFinalRef.current = flushInterimToFinal;
+
   /**
    * Handle recognition end with SAFE restart
    */
@@ -269,7 +277,7 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
 
     // CRITICAL: Flush any pending interim text BEFORE checking restart conditions
     // This prevents word loss at segment boundaries
-    flushInterimToFinal();
+    flushInterimToFinalRef.current();
 
     if (!isAnalyzingRef.current || isManualStopRef.current) return;
 
@@ -294,19 +302,25 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
         consecutiveFailuresRef.current++;
       }
     }, delay);
-  }, [flushInterimToFinal]);
+  }, []); // No dependencies - uses refs for latest values
+
+  // Keep handleEndRef always pointing to latest function
+  handleEndRef.current = handleEnd;
 
   /**
    * Setup event handlers for the single recognition instance
+   * CRITICAL: Uses arrow functions that call refs to always get latest handlers
    */
   const setupRecognitionHandlers = useCallback((recognition: SpeechRecognition) => {
     recognition.onresult = (event: SpeechRecognitionEvent) => handleResult(event);
     recognition.onerror = (event: SpeechRecognitionErrorEvent) => handleError(event);
-    recognition.onend = () => handleEnd();
-  }, [handleResult, handleError, handleEnd]);
+    // CRITICAL: Call through ref to always use latest handleEnd function
+    recognition.onend = () => handleEndRef.current();
+  }, [handleResult, handleError]);
 
   /**
    * Watchdog: proactive restart before browser timeout
+   * CRITICAL: Uses ref to call latest flushInterimToFinal
    */
   const startWatchdog = useCallback(() => {
     if (watchdogTimerRef.current) {
@@ -326,7 +340,8 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
         isRestartingRef.current = true;
         
         // CRITICAL: Flush interim BEFORE stopping to prevent word loss
-        flushInterimToFinal();
+        // Uses ref to always get latest function
+        flushInterimToFinalRef.current();
         
         try {
           recognitionRef.current?.stop();
@@ -335,7 +350,7 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
         }
       }
     }, WATCHDOG_INTERVAL_MS);
-  }, [flushInterimToFinal]);
+  }, []); // No dependencies - uses refs
 
   const stopWatchdog = useCallback(() => {
     if (watchdogTimerRef.current) {
