@@ -1024,59 +1024,61 @@ export default function AISpeakingResults() {
                 
                 return (
                   <>
-                    {/* Recognition Corrections Section - What We Heard */}
-                    <Card>
-                      <CardHeader>
-                        <CardTitle className="flex items-center gap-2 text-base md:text-lg">
-                          <AlertCircle className="w-5 h-5 text-warning" />
-                          What We Heard
-                        </CardTitle>
-                        <CardDescription>
-                          Speech recognition may have misheard these phrases. Here's what you likely intended.
-                        </CardDescription>
-                      </CardHeader>
-                      <CardContent>
-                        {report.recognition_corrections && report.recognition_corrections.length > 0 ? (
-                          <div className="overflow-x-auto">
-                            <table className="w-full text-sm">
-                              <thead>
-                                <tr className="border-b">
-                                  <th className="text-left py-3 px-2 font-medium">As Captured</th>
-                                  <th className="text-left py-3 px-2 font-medium">Likely Intended</th>
-                                  <th className="text-left py-3 px-2 font-medium hidden md:table-cell">Context</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {report.recognition_corrections.map((correction, i) => (
-                                  <tr key={i} className="border-b last:border-0">
-                                    <td className="py-3 px-2">
-                                      <Badge variant="outline" className="bg-warning/10 text-warning-foreground border-warning/30">
-                                        {correction.captured}
-                                      </Badge>
-                                    </td>
-                                    <td className="py-3 px-2">
-                                      <Badge variant="outline" className="bg-primary/10 text-primary border-primary/30">
-                                        {correction.intended}
-                                      </Badge>
-                                    </td>
-                                    <td className="py-3 px-2 text-muted-foreground italic hidden md:table-cell">
-                                      "{correction.context}"
-                                    </td>
+                    {/* Recognition Corrections Section - What We Heard - ONLY for text-based (Basic) evaluation */}
+                    {result.has_text_based_transcripts && (
+                      <Card>
+                        <CardHeader>
+                          <CardTitle className="flex items-center gap-2 text-base md:text-lg">
+                            <AlertCircle className="w-5 h-5 text-warning" />
+                            What We Heard
+                          </CardTitle>
+                          <CardDescription>
+                            Speech recognition may have misheard these phrases. Here's what you likely intended.
+                          </CardDescription>
+                        </CardHeader>
+                        <CardContent>
+                          {report.recognition_corrections && report.recognition_corrections.length > 0 ? (
+                            <div className="overflow-x-auto">
+                              <table className="w-full text-sm">
+                                <thead>
+                                  <tr className="border-b">
+                                    <th className="text-left py-3 px-2 font-medium">As Captured</th>
+                                    <th className="text-left py-3 px-2 font-medium">Likely Intended</th>
+                                    <th className="text-left py-3 px-2 font-medium hidden md:table-cell">Context</th>
                                   </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        ) : (
-                          <div className="text-center py-6 space-y-2">
-                            <CheckCircle2 className="w-10 h-10 text-success mx-auto" />
-                            <p className="text-sm text-muted-foreground">
-                              No recognition errors detected — your speech was clearly captured.
-                            </p>
-                          </div>
-                        )}
-                      </CardContent>
-                    </Card>
+                                </thead>
+                                <tbody>
+                                  {report.recognition_corrections.map((correction, i) => (
+                                    <tr key={i} className="border-b last:border-0">
+                                      <td className="py-3 px-2">
+                                        <Badge variant="outline" className="bg-warning/10 text-warning-foreground border-warning/30">
+                                          {correction.captured}
+                                        </Badge>
+                                      </td>
+                                      <td className="py-3 px-2">
+                                        <Badge variant="outline" className="bg-primary/10 text-primary border-primary/30">
+                                          {correction.intended}
+                                        </Badge>
+                                      </td>
+                                      <td className="py-3 px-2 text-muted-foreground italic hidden md:table-cell">
+                                        "{correction.context}"
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          ) : (
+                            <div className="text-center py-6 space-y-2">
+                              <CheckCircle2 className="w-10 h-10 text-success mx-auto" />
+                              <p className="text-sm text-muted-foreground">
+                                No recognition errors detected — your speech was clearly captured.
+                              </p>
+                            </div>
+                          )}
+                        </CardContent>
+                      </Card>
+                    )}
 
                     {/* Vocabulary Upgrades Section */}
                     <Card>

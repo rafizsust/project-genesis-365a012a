@@ -133,7 +133,7 @@ export function ProcessingCardSkeleton({
             <div className="flex justify-between text-xs text-muted-foreground mb-1.5">
               <span className="flex items-center gap-1">
                 <span className="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
-                {progress > 0 ? `Part ${currentPart}/${totalParts}` : 'Initializing...'}
+                {progress > 0 ? `Part ${currentPart} of ${totalParts}` : 'Initializing...'}
               </span>
               <span>{progress > 0 ? `${progress}%` : ''}</span>
             </div>

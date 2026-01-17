@@ -11,7 +11,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Badge } from '@/components/ui/badge';
+
 import {
   Tooltip,
   TooltipContent,
@@ -253,84 +253,6 @@ export function MicrophoneTest({ onTestComplete, onBack, initialAccent, initialE
         }
       </p>
 
-      {/* Browser Mode Badge */}
-      <div className="flex justify-center">
-        {browser.isEdge ? (
-          <TooltipProvider>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Badge variant="secondary" className="gap-1.5">
-                  <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-                  Edge Natural Mode
-                </Badge>
-              </TooltipTrigger>
-              <TooltipContent className="max-w-xs">
-                <p className="text-xs">
-                  Edge uses natural speech optimization that preserves pauses and fillers for accurate fluency scoring. No accent selection needed.
-                </p>
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
-        ) : browser.isChrome ? (
-          <Badge variant="outline" className="gap-1.5">
-            <span className="w-2 h-2 bg-blue-500 rounded-full" />
-            Chrome Accent Mode
-          </Badge>
-        ) : (
-          <Badge variant="outline">{browser.browserName}</Badge>
-        )}
-      </div>
-
-      {/* Accent Selection - ONLY shown on Chrome, not on Edge */}
-      {browser.isChrome && (
-        <div className="bg-muted/50 rounded-lg p-4 space-y-3">
-          <div className="flex items-center justify-center gap-2 text-sm font-medium text-foreground">
-            <Globe className="w-4 h-4" />
-            Select Your Accent
-            <TooltipProvider>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Info className="w-3.5 h-3.5 text-muted-foreground cursor-help" />
-                </TooltipTrigger>
-                <TooltipContent className="max-w-xs">
-                  <p className="text-xs">
-                    Chrome requires accent selection for stable speech recognition. 
-                    This setting is remembered for future tests.
-                  </p>
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            Choosing the correct accent improves speech recognition accuracy by ~30%
-          </p>
-          <Select value={selectedAccent} onValueChange={(v) => handleAccentChange(v as AccentCode)}>
-            <SelectTrigger className="w-full bg-background">
-              <SelectValue placeholder="Select your accent" />
-            </SelectTrigger>
-            <SelectContent className="bg-popover z-50">
-              {ACCENT_OPTIONS.map((accent) => (
-                <SelectItem key={accent.value} value={accent.value}>
-                  {accent.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      )}
-
-      {/* Edge info panel */}
-      {browser.isEdge && (
-        <div className="bg-green-500/10 border border-green-500/30 rounded-lg p-4 space-y-2">
-          <p className="text-sm font-medium text-green-700 dark:text-green-400">
-            ✓ Optimal browser detected
-          </p>
-          <p className="text-xs text-muted-foreground">
-            Microsoft Edge provides the best speech recognition experience with natural pause and filler detection for accurate fluency scoring.
-          </p>
-        </div>
-      )}
-
       {/* Recording indicator */}
       {isRecording && (
         <div className="flex items-center justify-center gap-3 py-3 px-4 bg-destructive/10 border border-destructive/30 rounded-lg animate-pulse">
@@ -341,6 +263,7 @@ export function MicrophoneTest({ onTestComplete, onBack, initialAccent, initialE
           <span className="text-destructive font-medium">Recording in progress...</span>
         </div>
       )}
+
 
       <div className="flex justify-center gap-4">
         <Button
@@ -457,6 +380,41 @@ export function MicrophoneTest({ onTestComplete, onBack, initialAccent, initialE
           </div>
         </RadioGroup>
 
+        {/* Accent Selection - ONLY shown on Chrome AND Basic Evaluation mode */}
+        {browser.isChrome && evaluationMode === 'basic' && (
+          <div className="bg-background/50 rounded-lg p-3 space-y-2 border">
+            <div className="flex items-center justify-center gap-2 text-xs font-medium text-foreground">
+              <Globe className="w-3.5 h-3.5" />
+              Select Your Accent
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Info className="w-3 h-3 text-muted-foreground cursor-help" />
+                  </TooltipTrigger>
+                  <TooltipContent className="max-w-xs">
+                    <p className="text-xs">
+                      Chrome requires accent selection for speech recognition. 
+                      This setting is remembered for future tests.
+                    </p>
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            </div>
+            <Select value={selectedAccent} onValueChange={(v) => handleAccentChange(v as AccentCode)}>
+              <SelectTrigger className="w-full bg-background text-sm h-9">
+                <SelectValue placeholder="Select your accent" />
+              </SelectTrigger>
+              <SelectContent className="bg-popover z-50">
+                {ACCENT_OPTIONS.map((accent) => (
+                  <SelectItem key={accent.value} value={accent.value}>
+                    {accent.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        )}
+
         {/* Warning messages based on selection */}
         {evaluationMode === 'basic' && browser.isChrome && (
           <div className="flex items-start gap-2 p-2 bg-warning/10 border border-warning/30 rounded text-xs text-warning">
@@ -465,9 +423,9 @@ export function MicrophoneTest({ onTestComplete, onBack, initialAccent, initialE
           </div>
         )}
         {evaluationMode === 'accuracy' && (
-          <div className="flex items-start gap-2 p-2 bg-destructive/10 border border-destructive/30 rounded text-xs text-destructive">
+          <div className="flex items-start gap-2 p-2 bg-primary/10 border border-primary/30 rounded text-xs text-primary">
             <Info className="w-4 h-4 mt-0.5 flex-shrink-0" />
-            <p>Accuracy Mode uses significantly more AI tokens. You may hit your daily limit faster.</p>
+            <p>Accuracy Mode sends audio directly to AI — no browser speech recognition needed.</p>
           </div>
         )}
       </div>
