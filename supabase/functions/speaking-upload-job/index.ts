@@ -3,9 +3,15 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { crypto } from "https://deno.land/std@0.168.0/crypto/mod.ts";
 import { getFromR2 } from "../_shared/r2Client.ts";
 import { getActiveGeminiKeysForModel } from "../_shared/apiKeyQuotaUtils.ts";
+import {
+  decryptKey,
+  uploadToGoogleFileAPI,
+  corsHeaders,
+} from "../_shared/speakingUtils.ts";
 
 /**
- * Speaking Upload Job - Stage 1 of Speaking Evaluation
+ * OPTIMIZED Speaking Upload Job - Stage 1 of Speaking Evaluation
+ * Uses shared utilities from speakingUtils.ts
  * 
  * This function ONLY handles:
  * 1. Downloading audio files from R2
@@ -15,12 +21,6 @@ import { getActiveGeminiKeysForModel } from "../_shared/apiKeyQuotaUtils.ts";
  * This is idempotent - if URIs already exist, it skips upload.
  * Updates heartbeat during long operations to prevent timeout detection.
  */
-
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
-};
 
 const HEARTBEAT_INTERVAL_MS = 15000; // Update heartbeat every 15 seconds
 const LOCK_DURATION_MINUTES = 5;
