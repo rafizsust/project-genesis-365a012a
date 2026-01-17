@@ -87,9 +87,10 @@ interface ProcessingCardSkeletonProps {
 
 export function ProcessingCardSkeleton({
   stage,
-  progress = 0,
+  // progress is kept for interface compatibility but we use currentPart for display
+  progress: _progress = 0,
   currentPart = 0,
-  // totalParts intentionally unused - we now show "Processing Part X" instead of "Part X of Y"
+  // totalParts intentionally unused - we now show "Evaluating Part X of 3"
   totalParts: _totalParts = 3,
   retryCount = 0,
   onCancel,
@@ -131,19 +132,18 @@ export function ProcessingCardSkeleton({
         {/* Animated progress bar */}
         {stage === 'processing' && (
           <div className="mb-4">
-            <div className="flex justify-between text-xs text-muted-foreground mb-1.5">
-              <span className="flex items-center gap-1">
+            <div className="flex justify-center text-sm text-muted-foreground mb-2">
+              <span className="flex items-center gap-2">
                 <span className="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
-                {progress > 0 ? `Processing Part ${currentPart}` : 'Initializing...'}
+                {currentPart > 0 ? `Evaluating Part ${currentPart} of 3` : 'Initializing...'}
               </span>
-              <span>{progress > 0 ? `${progress}%` : ''}</span>
             </div>
             <div className="h-2 bg-muted rounded-full overflow-hidden">
               <div 
                 className="h-full bg-gradient-to-r from-primary to-accent transition-all duration-500 ease-out rounded-full"
                 style={{ 
-                  width: progress > 0 ? `${progress}%` : '100%',
-                  animation: progress === 0 ? 'shimmer 2s infinite' : undefined 
+                  width: currentPart > 0 ? `${Math.round((currentPart / 3) * 100)}%` : '100%',
+                  animation: currentPart === 0 ? 'shimmer 2s infinite' : undefined 
                 }}
               />
             </div>

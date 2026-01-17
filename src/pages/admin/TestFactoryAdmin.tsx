@@ -1072,9 +1072,28 @@ export default function TestFactoryAdmin() {
                             </div>
                           </div>
                           
-                          <div className="flex items-center justify-between text-sm text-muted-foreground mb-2">
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted-foreground mb-2">
                             <span>Difficulty: {job.difficulty}</span>
-                            <span>{job.success_count + job.failure_count} / {job.quantity}</span>
+                            {job.module === 'speaking' && job.question_type && (
+                              <span className="font-medium">
+                                {job.question_type === 'full_test' ? 'Full Test' : 
+                                 job.question_type === 'part_1' ? 'Part 1' :
+                                 job.question_type === 'part_2' ? 'Part 2' :
+                                 job.question_type === 'part_3' ? 'Part 3' :
+                                 job.question_type.replace(/_/g, ' ')}
+                              </span>
+                            )}
+                            {job.module === 'writing' && job.question_type && (
+                              <span className="font-medium">
+                                {job.question_type === 'task1' ? 'Task 1' :
+                                 job.question_type === 'task2' ? 'Task 2' :
+                                 job.question_type.replace(/_/g, ' ')}
+                              </span>
+                            )}
+                            {(job.module === 'reading' || job.module === 'listening') && job.question_type && job.question_type !== 'mixed' && (
+                              <span className="font-medium">{job.question_type.replace(/_/g, ' ')}</span>
+                            )}
+                            <span className="ml-auto">{job.success_count + job.failure_count} / {job.quantity}</span>
                           </div>
 
                           {job.status === "processing" && (

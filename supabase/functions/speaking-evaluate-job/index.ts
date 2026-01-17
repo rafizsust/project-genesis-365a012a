@@ -32,12 +32,11 @@ import {
  */
 
 // =============================================================================
-// Model Priority: Stable native audio models for speech analysis
+// Model Priority: gemini-2.5-flash as primary for all speaking evaluations
 // =============================================================================
 const GEMINI_MODELS = [
-  'gemini-2.0-flash',                    // 1. Primary: Best Audio Stability
-  'gemini-2.0-flash-lite-preview-02-05', // 2. Backup: High Quota Audio
-  'gemini-2.5-flash',                    // 3. Last Resort: Standard stable
+  'gemini-2.5-flash',                    // 1. Primary: Best for speaking evaluation
+  'gemini-2.0-flash',                    // 2. Backup: Stable audio model
 ];
 const HEARTBEAT_INTERVAL_MS = 15000;
 const LOCK_DURATION_MINUTES = 5;

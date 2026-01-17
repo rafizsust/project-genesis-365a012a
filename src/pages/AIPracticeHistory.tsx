@@ -741,7 +741,7 @@ export default function AIPracticeHistory() {
                               <Badge variant="outline" className="gap-1 text-xs border-primary/50 text-primary">
                                 <Loader2 className="w-3 h-3 animate-spin" />
                                 {pendingJob.status === 'processing' 
-                                  ? `Evaluating${pendingJob.progress ? ` (${pendingJob.progress}%)` : ''}${pendingJob.current_part && pendingJob.total_parts ? ` Part ${pendingJob.current_part} of ${pendingJob.total_parts}` : '...'}`
+                                  ? `Evaluating Part ${pendingJob.current_part || 1} of ${pendingJob.total_parts || 3}`
                                   : 'Queued'}
                               </Badge>
                             )}
