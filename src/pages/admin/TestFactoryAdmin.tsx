@@ -1076,17 +1076,20 @@ export default function TestFactoryAdmin() {
                             <span>Difficulty: {job.difficulty}</span>
                             {job.module === 'speaking' && job.question_type && (
                               <span className="font-medium">
-                                {job.question_type === 'full_test' ? 'Full Test' : 
-                                 job.question_type === 'part_1' ? 'Part 1' :
-                                 job.question_type === 'part_2' ? 'Part 2' :
-                                 job.question_type === 'part_3' ? 'Part 3' :
+                                {job.question_type.toUpperCase() === 'FULL_TEST' ? 'Full Test' : 
+                                 job.question_type.toUpperCase() === 'PART_1' ? 'Part 1' :
+                                 job.question_type.toUpperCase() === 'PART_2' ? 'Part 2' :
+                                 job.question_type.toUpperCase() === 'PART_3' ? 'Part 3' :
+                                 job.question_type === 'mixed' ? null :
                                  job.question_type.replace(/_/g, ' ')}
                               </span>
                             )}
                             {job.module === 'writing' && job.question_type && (
                               <span className="font-medium">
-                                {job.question_type === 'task1' ? 'Task 1' :
-                                 job.question_type === 'task2' ? 'Task 2' :
+                                {job.question_type.toUpperCase() === 'TASK_1' || job.question_type === 'task1' ? 'Task 1' :
+                                 job.question_type.toUpperCase() === 'TASK_2' || job.question_type === 'task2' ? 'Task 2' :
+                                 job.question_type.toUpperCase() === 'FULL_TEST' ? 'Full Test' :
+                                 job.question_type === 'mixed' ? null :
                                  job.question_type.replace(/_/g, ' ')}
                               </span>
                             )}

@@ -68,6 +68,8 @@ const DIFFICULTY_COLORS: Record<string, string> = {
 };
 
 const MODULES = ['reading', 'listening', 'writing', 'speaking'];
+// Difficulty priority order: medium first, then hard, then easy
+const DIFFICULTY_PRIORITY = ['medium', 'hard', 'easy'];
 const DIFFICULTIES = ['easy', 'medium', 'hard'];
 
 const QUESTION_TYPES: Record<string, string[]> = {
@@ -152,9 +154,44 @@ export default function TestBankRecommendations() {
         }
       }
 
-      // Sort by count (ascending) then by module, question type
+      // Smart prioritization algorithm:
+      // 1. Group by module + questionType + topic (ignoring difficulty)
+      // 2. For each group, find the min count across all difficulties
+      // 3. Priority: First cover all topic+type combos at medium, then hard, then easy
+      
+      // First, compute min count per topic+type combo (across all difficulties)
+      const topicTypeMinCount = new Map<string, number>();
+      for (const item of allCombinations) {
+        const topicTypeKey = `${item.module}|${item.questionType}|${item.topic}`;
+        const existing = topicTypeMinCount.get(topicTypeKey);
+        if (existing === undefined || item.count < existing) {
+          topicTypeMinCount.set(topicTypeKey, item.count);
+        }
+      }
+
+      // Sort with new priority:
+      // 1. Primary: min count across topic+type combo (to ensure all combos get at least 1 before any gets 2)
+      // 2. Secondary: difficulty priority (medium → hard → easy)
+      // 3. Tertiary: individual count for this specific difficulty
+      // 4. Then by module, question type, topic
       allCombinations.sort((a, b) => {
+        const aTopicTypeKey = `${a.module}|${a.questionType}|${a.topic}`;
+        const bTopicTypeKey = `${b.module}|${b.questionType}|${b.topic}`;
+        const aMinCount = topicTypeMinCount.get(aTopicTypeKey) || 0;
+        const bMinCount = topicTypeMinCount.get(bTopicTypeKey) || 0;
+
+        // 1. Prioritize combos with lower min count (cover gaps first)
+        if (aMinCount !== bMinCount) return aMinCount - bMinCount;
+
+        // 2. Difficulty priority: medium → hard → easy
+        const aDiffPriority = DIFFICULTY_PRIORITY.indexOf(a.difficulty);
+        const bDiffPriority = DIFFICULTY_PRIORITY.indexOf(b.difficulty);
+        if (aDiffPriority !== bDiffPriority) return aDiffPriority - bDiffPriority;
+
+        // 3. Within same difficulty tier, prefer lower individual count
         if (a.count !== b.count) return a.count - b.count;
+
+        // 4. Then by module, question type, topic for consistency
         if (a.module !== b.module) return a.module.localeCompare(b.module);
         if (a.questionType !== b.questionType) return a.questionType.localeCompare(b.questionType);
         return a.topic.localeCompare(b.topic);
