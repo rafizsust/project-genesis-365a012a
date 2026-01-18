@@ -24,7 +24,6 @@ import { Badge } from '@/components/ui/badge';
 import { MicrophoneTest } from '@/components/speaking/MicrophoneTest';
 import { AILoadingScreen } from '@/components/common/AILoadingScreen';
 import { useFullscreenTest } from '@/hooks/useFullscreenTest';
-import { uploadToR2 } from '@/lib/r2Upload';
 
 type SpeakingTest = Tables<'speaking_tests'>;
 
@@ -707,7 +706,7 @@ export default function SpeakingTest() {
     // Show AI Loading Screen
     setShowAILoadingScreen(true);
     setAiProgressSteps([
-      'Uploading your audio recordings',
+      'Processing your recordings',
       'Analyzing your speaking performance',
       'Generating detailed feedback report',
       'Calculating your overall band score',
@@ -722,7 +721,7 @@ export default function SpeakingTest() {
     };
 
     try {
-      await simulateProgress(0, 500); // Step 0: Uploading audio
+      await simulateProgress(0, 500); // Step 0: Processing recordings
 
       const submissionTimestamp = new Date().toISOString();
       
@@ -731,10 +730,10 @@ export default function SpeakingTest() {
         user_id: user.id,
         test_id: speakingTest.id!,
         submitted_at: submissionTimestamp,
-        audio_url_part1: null, // No longer storing audio files in Supabase Storage
+        audio_url_part1: null,
         audio_url_part2: null,
         audio_url_part3: null,
-        transcript_part1: null, // No longer storing transcripts in DB directly
+        transcript_part1: null,
         transcript_part2: null,
         transcript_part3: null,
       };
@@ -748,40 +747,40 @@ export default function SpeakingTest() {
 
       if (insertError) throw insertError;
 
-      // UPLOAD-FIRST APPROACH: Upload all audio files to R2 first, then send paths to Edge Function
-      const filePaths: Record<string, string> = {};
-      const uploadPromises: Promise<void>[] = [];
+      // PARALLEL APPROACH: Convert audio blobs to base64 and send directly to evaluation
+      // The edge function handles both evaluation AND R2 upload in background
+      const audioDataPromises: Promise<{ key: string; dataUrl: string }>[] = [];
       
       for (const key in audioBlobs.current) {
         const blob = audioBlobs.current[key];
-        const fileName = `${key}.webm`;
-        
-        uploadPromises.push(
-          uploadToR2({
-            file: blob,
-            folder: `speaking/${user.id}/${newSubmission.id}`,
-            fileName,
-          }).then((result) => {
-            if (result.success && result.key) {
-              filePaths[key] = result.key;
-              console.log(`[SpeakingTest] Uploaded ${key} to R2: ${result.key}`);
-            } else {
-              console.error(`[SpeakingTest] Failed to upload ${key}:`, result.error);
-              throw new Error(`Failed to upload audio: ${result.error}`);
-            }
+        audioDataPromises.push(
+          new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+              resolve({ key, dataUrl: reader.result as string });
+            };
+            reader.onerror = () => reject(new Error(`Failed to read audio blob for ${key}`));
+            reader.readAsDataURL(blob);
           })
         );
       }
 
-      // Wait for all uploads to complete
-      await Promise.all(uploadPromises);
-      console.log('[SpeakingTest] All audio files uploaded. File paths:', filePaths);
+      const audioDataArray = await Promise.all(audioDataPromises);
+      const audioData: Record<string, string> = {};
+      for (const { key, dataUrl } of audioDataArray) {
+        audioData[key] = dataUrl;
+      }
+
+      console.log('[SpeakingTest] Audio data prepared:', Object.keys(audioData).length, 'segments');
 
       await simulateProgress(1); // Step 1: Analyzing with AI
 
-      // Trigger AI evaluation, sending file paths instead of audio data
-      const { error: evaluationError } = await supabase.functions.invoke('evaluate-speaking-submission', {
-        body: { submissionId: newSubmission.id, filePaths },
+      // Call the parallel evaluation function - it handles both evaluation and R2 upload
+      const { data, error: evaluationError } = await supabase.functions.invoke('evaluate-speaking-parallel', {
+        body: { 
+          testId: speakingTest.id,
+          audioData,
+        },
       });
 
       if (evaluationError) {
@@ -810,7 +809,13 @@ export default function SpeakingTest() {
       if (!exitRequestedRef.current && isMountedRef.current) {
         // Exit fullscreen before navigating to results
         await exitFullscreen();
-        navigate(`/speaking/evaluation/${testId}/${newSubmission.id}`);
+        // Navigate to results using the result ID from the evaluation response
+        const resultId = data?.resultId;
+        if (resultId) {
+          navigate(`/ai-speaking/results/${speakingTest.id}/${resultId}`);
+        } else {
+          navigate(`/speaking/evaluation/${testId}/${newSubmission.id}`);
+        }
       }
     } catch (error: any) {
       console.error('Error submitting speaking test:', error);
