@@ -227,12 +227,13 @@ export default function TestBankRecommendations() {
 
     try {
       // Build payload matching TestFactoryAdmin
+      // IMPORTANT: Backend expects camelCase `questionType`, not snake_case `question_type`
       const payload: Record<string, unknown> = {
         module: item.module,
         topic: item.topic,
         difficulty: item.difficulty,
         quantity: 1, // Generate 1 test at a time for recommendations
-        question_type: item.questionType,
+        questionType: item.questionType, // Must be camelCase for backend
       };
 
       // Add writing-specific fields
