@@ -14,7 +14,11 @@ import { ExitTestConfirmDialog } from '@/components/common/ExitTestConfirmDialog
 import { MicrophoneTest, AccentCode, EvaluationMode } from '@/components/speaking/MicrophoneTest';
 import { describeApiError } from '@/lib/apiErrors';
 import { supabase } from '@/integrations/supabase/client';
-import { patchSpeakingSubmissionTracker, clearSpeakingSubmissionTracker } from '@/lib/speakingSubmissionTracker';
+import { 
+  patchSpeakingSubmissionTracker, 
+  clearSpeakingSubmissionTracker,
+  type SpeakingSubmissionStage 
+} from '@/lib/speakingSubmissionTracker';
 import {
   saveAllAudioSegments,
   deleteAudioSegments,
@@ -1042,6 +1046,15 @@ export default function AIPracticeSpeakingTest() {
     setEvaluationStep(0);
     setFailedUploads([]); // Reset failed uploads on new submission attempt
     setSubmissionProgress({ step: 'Preparing', detail: 'Getting ready to process your recordings...', currentItem: 0, totalItems: 0 });
+    
+    // Initialize client-side submission tracker for History page progress display
+    if (testId) {
+      patchSpeakingSubmissionTracker(testId, {
+        mode: evaluationMode === 'accuracy' ? 'accuracy' : 'basic',
+        stage: 'preparing' as SpeakingSubmissionStage,
+        detail: 'Getting ready to process recordings...',
+      });
+    }
 
     try {
       // Ensure all transcript finalizations (Chrome late-final results) are flushed before submission.
@@ -1104,6 +1117,14 @@ export default function AIPracticeSpeakingTest() {
             currentItem: 0, 
             totalItems: totalAudioFiles 
           });
+          
+          // Update tracker for History page
+          if (testId) {
+            patchSpeakingSubmissionTracker(testId, {
+              stage: 'converting' as SpeakingSubmissionStage,
+              detail: `Converting ${totalAudioFiles} audio files...`,
+            });
+          }
 
           // Convert all audio to MP3 base64 IN PARALLEL
           const conversionStartTime = Date.now();
@@ -1156,6 +1177,14 @@ export default function AIPracticeSpeakingTest() {
             currentItem: 0, 
             totalItems: 0 
           });
+          
+          // Update tracker for History page
+          if (testId) {
+            patchSpeakingSubmissionTracker(testId, {
+              stage: 'evaluating' as SpeakingSubmissionStage,
+              detail: 'Sending audio for parallel evaluation...',
+            });
+          }
 
           console.log(`[AIPracticeSpeakingTest] Calling evaluate-speaking-parallel with ${Object.keys(audioData).length} audio segments`);
           const evaluationStartTime = Date.now();
@@ -1206,6 +1235,9 @@ export default function AIPracticeSpeakingTest() {
 
             setPhase('done');
             parallelSuccess = true;
+            
+            // Clear tracker on success
+            if (testId) clearSpeakingSubmissionTracker(testId);
 
             // Navigate to history page - consistent with async mode
             if (!exitRequestedRef.current && isMountedRef.current) {
@@ -1290,6 +1322,14 @@ export default function AIPracticeSpeakingTest() {
       console.log('[AIPracticeSpeakingTest] BASIC MODE: Sequential R2 upload');
       setSubmissionProgress({ step: 'Converting Audio', detail: `Preparing ${totalAudioFiles} audio files for upload...`, currentItem: 0, totalItems: totalAudioFiles });
       console.log('[AIPracticeSpeakingTest] Step 1: Uploading audio files to R2...');
+      
+      // Update tracker for History page
+      if (testId) {
+        patchSpeakingSubmissionTracker(testId, {
+          stage: 'converting' as SpeakingSubmissionStage,
+          detail: `Preparing ${totalAudioFiles} audio files...`,
+        });
+      }
 
       // STEP 1: Upload all audio files to R2
       const filePaths: Record<string, string> = {};
@@ -1334,6 +1374,14 @@ export default function AIPracticeSpeakingTest() {
           currentItem: i + 1, 
           totalItems: totalAudioFiles 
         });
+        
+        // Update tracker for History page
+        if (testId) {
+          patchSpeakingSubmissionTracker(testId, {
+            stage: 'uploading' as SpeakingSubmissionStage,
+            detail: `Uploading ${i + 1} of ${totalAudioFiles}...`,
+          });
+        }
 
         try {
           const { data: uploadResult, error: uploadError } = await supabase.functions.invoke('upload-speaking-audio', {
@@ -1424,6 +1472,14 @@ export default function AIPracticeSpeakingTest() {
       // Include transcript data for text-based evaluation (much cheaper than audio)
       // cancelExisting: true ensures any stale jobs are cancelled before starting a new one
       
+      // Update tracker for History page
+      if (testId) {
+        patchSpeakingSubmissionTracker(testId, {
+          stage: 'queuing' as SpeakingSubmissionStage,
+          detail: 'Sending to AI for evaluation...',
+        });
+      }
+      
       // Debug: Log FULL transcript text for each speaking question
       console.log('[AIPracticeSpeakingTest] === SPEAKING SUBMISSION TRANSCRIPTS ===');
       for (const [key, value] of Object.entries(transcriptData)) {
@@ -1481,6 +1537,9 @@ export default function AIPracticeSpeakingTest() {
         });
 
         setPhase('done');
+        
+        // Clear tracker - job is now in DB, History will poll via realtime
+        if (testId) clearSpeakingSubmissionTracker(testId);
 
         // Navigate to history page - results will appear when ready
         if (!exitRequestedRef.current && isMountedRef.current) {
@@ -1509,6 +1568,15 @@ export default function AIPracticeSpeakingTest() {
         setSubmissionError(errDesc);
         setPhase('submission_error');
         setIsResubmitting(false);
+        
+        // Update tracker to failed state
+        if (testId) {
+          patchSpeakingSubmissionTracker(testId, {
+            stage: 'failed' as SpeakingSubmissionStage,
+            lastError: errDesc.title,
+            detail: errDesc.description,
+          });
+        }
 
         toast({
           title: errDesc.title,

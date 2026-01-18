@@ -12,6 +12,10 @@ import { useAuth } from '@/hooks/useAuth';
 import { useBrowserNotifications } from '@/hooks/useBrowserNotifications';
 import { supabase } from '@/integrations/supabase/client';
 import { 
+  getSpeakingSubmissionTracker,
+  type SpeakingSubmissionTracker,
+} from '@/lib/speakingSubmissionTracker';
+import { 
   BookOpen, 
   Headphones, 
   PenTool,
@@ -31,6 +35,8 @@ import {
   BellOff,
   Zap,
   Timer,
+  Upload,
+  AudioLines,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { format } from 'date-fns';
@@ -124,8 +130,51 @@ export default function AIPracticeHistory() {
   const [activeModule, setActiveModule] = useState<string>('all');
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [pendingEvaluations, setPendingEvaluations] = useState<Map<string, PendingEvaluation>>(new Map());
+  // Client-side tracker state for tests still uploading/converting (before DB job exists)
+  const [clientTrackers, setClientTrackers] = useState<Map<string, SpeakingSubmissionTracker>>(new Map());
 
-  // Load tests on mount
+  // Listen for client-side tracker updates (from test page still running in another tab or before navigation)
+  useEffect(() => {
+    // Check for any existing trackers on mount (in case user refreshed or navigated back)
+    const checkExistingTrackers = () => {
+      const newTrackers = new Map<string, SpeakingSubmissionTracker>();
+      // Check sessionStorage for any trackers
+      for (let i = 0; i < sessionStorage.length; i++) {
+        const key = sessionStorage.key(i);
+        if (key?.startsWith('speaking_submission_tracker:')) {
+          const testId = key.replace('speaking_submission_tracker:', '');
+          const tracker = getSpeakingSubmissionTracker(testId);
+          if (tracker && tracker.stage !== 'completed' && tracker.stage !== 'failed') {
+            newTrackers.set(testId, tracker);
+          }
+        }
+      }
+      if (newTrackers.size > 0) {
+        setClientTrackers(newTrackers);
+      }
+    };
+
+    checkExistingTrackers();
+
+    // Listen for tracker updates
+    const handleTrackerUpdate = (e: CustomEvent<{ testId: string; tracker: SpeakingSubmissionTracker | null }>) => {
+      const { testId, tracker } = e.detail;
+      setClientTrackers(prev => {
+        const updated = new Map(prev);
+        if (!tracker || tracker.stage === 'completed' || tracker.stage === 'failed') {
+          updated.delete(testId);
+        } else {
+          updated.set(testId, tracker);
+        }
+        return updated;
+      });
+    };
+
+    window.addEventListener('speaking-submission-tracker', handleTrackerUpdate as EventListener);
+    return () => {
+      window.removeEventListener('speaking-submission-tracker', handleTrackerUpdate as EventListener);
+    };
+  }, []);
   useEffect(() => {
     if (!authLoading && user) {
       loadTests();
@@ -884,6 +933,9 @@ export default function AIPracticeHistory() {
                 const hasFailedSub = hasFailedSubmission(test.id, testType);
                 const isPendingEval = pendingEvaluations.has(test.id);
                 const pendingJob = pendingEvaluations.get(test.id);
+                // Client-side tracker for tests still uploading (before DB job exists)
+                const clientTracker = test.module === 'speaking' ? clientTrackers.get(test.id) : null;
+                const isClientUploading = !!clientTracker && ['preparing', 'converting', 'uploading', 'queuing'].includes(clientTracker.stage);
                 
                 return (
                   <Card 
@@ -891,7 +943,7 @@ export default function AIPracticeHistory() {
                     className={cn(
                       "transition-colors",
                       hasResult ? "hover:border-primary/50 cursor-pointer" : "hover:border-border",
-                      isPendingEval && "border-primary/30 animate-pulse"
+                      (isPendingEval || isClientUploading) && "border-primary/30 animate-pulse"
                     )}
                     onClick={() => hasResult && handleViewResults(test)}
                   >
@@ -944,7 +996,22 @@ export default function AIPracticeHistory() {
                                 Evaluation Failed
                               </Badge>
                             )}
-                            {!hasResult && !hasFailedSub && !isPendingEval && (
+                            {/* Client-side uploading progress (before DB job exists) */}
+                            {isClientUploading && clientTracker && (
+                              <Badge variant="outline" className="gap-1 text-xs border-primary/50 text-primary">
+                                {clientTracker.stage === 'uploading' ? (
+                                  <Upload className="w-3 h-3 animate-pulse" />
+                                ) : clientTracker.stage === 'converting' ? (
+                                  <AudioLines className="w-3 h-3 animate-pulse" />
+                                ) : (
+                                  <Loader2 className="w-3 h-3 animate-spin" />
+                                )}
+                                {clientTracker.stage === 'converting' ? 'Converting audio...' :
+                                 clientTracker.stage === 'uploading' ? 'Uploading...' :
+                                 clientTracker.stage === 'queuing' ? 'Queuing...' : 'Preparing...'}
+                              </Badge>
+                            )}
+                            {!hasResult && !hasFailedSub && !isPendingEval && !isClientUploading && (
                               <Badge variant="outline" className="gap-1 text-xs border-warning/50 text-warning">
                                 <AlertCircle className="w-3 h-3" />
                                 Not Submitted
