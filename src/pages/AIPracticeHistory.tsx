@@ -138,6 +138,7 @@ function getStageLabel(stage: string | null | undefined, currentPart?: number, t
 
   switch (stage) {
     case 'pending_upload':
+    case 'pending_text_eval':
     case 'pending':
       return 'Queued';
     case 'uploading':
@@ -169,6 +170,8 @@ function getStageLabel(stage: string | null | undefined, currentPart?: number, t
       return 'Processing...';
   }
 }
+
+
 
 export default function AIPracticeHistory() {
   const navigate = useNavigate();
@@ -525,10 +528,13 @@ export default function AIPracticeHistory() {
     }
   };
 
+
   const [retryingJobId, setRetryingJobId] = useState<string | null>(null);
   const [cancellingJobId, setCancellingJobId] = useState<string | null>(null);
   const [parallelResubmitting, setParallelResubmitting] = useState<string | null>(null);
   const [confirmResubmitTestId, setConfirmResubmitTestId] = useState<string | null>(null);
+  const [resubmitEvaluationMode, setResubmitEvaluationMode] = useState<'basic' | 'accuracy'>('accuracy');
+
 
   const handleCancelEvaluation = async (testId: string) => {
     const pendingJob = pendingEvaluations.get(testId);
@@ -620,7 +626,7 @@ export default function AIPracticeHistory() {
   // Handle resubmit (uses stored R2 audio, single API call)
   const handleResubmit = async (testId: string, evaluationMode: 'basic' | 'accuracy') => {
     setParallelResubmitting(testId);
-    
+
     try {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) {
@@ -634,7 +640,7 @@ export default function AIPracticeHistory() {
       });
 
       const response = await supabase.functions.invoke('resubmit-parallel', {
-        body: { testId, evaluationMode: resubmitEvaluationMode },
+        body: { testId, evaluationMode },
       });
 
       if (response.error) {
@@ -790,21 +796,35 @@ export default function AIPracticeHistory() {
               This will overwrite your previous score/report for this test with a new evaluation.
             </AlertDialogDescription>
           </AlertDialogHeader>
+
+          <div className="mt-3">
+            <div className="text-sm font-medium text-foreground mb-2">Evaluation type</div>
+            <Tabs value={resubmitEvaluationMode} onValueChange={(v) => setResubmitEvaluationMode(v as 'basic' | 'accuracy')}>
+              <TabsList className="grid grid-cols-2 w-full">
+                <TabsTrigger value="basic">Basic</TabsTrigger>
+                <TabsTrigger value="accuracy">Accuracy</TabsTrigger>
+              </TabsList>
+            </Tabs>
+            <p className="mt-2 text-xs text-muted-foreground">
+              Basic is faster/cheaper; Accuracy uses audio-based evaluation for best scoring precision.
+            </p>
+          </div>
+
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
                 if (!confirmResubmitTestId) return;
-                void handleResubmit(confirmResubmitTestId);
+                void handleResubmit(confirmResubmitTestId, resubmitEvaluationMode);
                 setConfirmResubmitTestId(null);
               }}
             >
-              Yes, re-evaluate
+              Re-evaluate
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-      
+
       <main className="flex-1 py-6 md:py-8">
         <div className="container max-w-4xl mx-auto px-4">
           {/* Header */}
@@ -1071,7 +1091,7 @@ export default function AIPracticeHistory() {
                               )}
                               
                               {/* Cancel button for pending evaluations */}
-                              {isEvaluating && pendingJob && (
+                              {pendingJob && ['pending', 'processing', 'retrying'].includes(pendingJob.status) && (
                                 <Button
                                   variant="ghost"
                                   size="icon"
@@ -1087,7 +1107,7 @@ export default function AIPracticeHistory() {
                                   )}
                                 </Button>
                               )}
-                              
+
                               {/* Retry button for failed/stale */}
                               {isPendingEval && pendingJob && ['stale', 'failed'].includes(pendingJob.status) && (
                                 <Button
