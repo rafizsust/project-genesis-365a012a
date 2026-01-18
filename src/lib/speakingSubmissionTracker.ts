@@ -74,8 +74,45 @@ export function patchSpeakingSubmissionTracker(
 
 export function clearSpeakingSubmissionTracker(testId: string) {
   try {
+    // Before clearing, persist timing to a separate key so History can still display it
+    const tracker = getSpeakingSubmissionTracker(testId);
+    if (tracker?.timing && (tracker.timing.totalMs || tracker.timing.evaluationMs)) {
+      const timingKey = `speaking_submission_timing:${testId}`;
+      sessionStorage.setItem(timingKey, JSON.stringify({
+        timing: tracker.timing,
+        completedAt: Date.now(),
+      }));
+    }
+    
     sessionStorage.removeItem(storageKey(testId));
     window.dispatchEvent(new CustomEvent('speaking-submission-tracker', { detail: { testId, tracker: null } }));
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Get persisted timing data after tracker was cleared
+ * History page can use this to show timing even after navigation
+ */
+export function getPersistedTiming(testId: string): SpeakingSubmissionTiming | null {
+  try {
+    const timingKey = `speaking_submission_timing:${testId}`;
+    const raw = sessionStorage.getItem(timingKey);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    return data.timing || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Clear persisted timing (call after displaying or after some time)
+ */
+export function clearPersistedTiming(testId: string) {
+  try {
+    sessionStorage.removeItem(`speaking_submission_timing:${testId}`);
   } catch {
     // ignore
   }

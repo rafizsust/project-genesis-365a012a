@@ -13,6 +13,7 @@ import { useBrowserNotifications } from '@/hooks/useBrowserNotifications';
 import { supabase } from '@/integrations/supabase/client';
 import { 
   getSpeakingSubmissionTracker,
+  getPersistedTiming,
   type SpeakingSubmissionTracker,
 } from '@/lib/speakingSubmissionTracker';
 import { 
@@ -140,16 +141,24 @@ function LiveElapsedTime({ startTime }: { startTime: string }) {
 // Timing breakdown component
 function TimingBreakdown({ 
   timing, 
-  tracker 
+  tracker,
+  testId 
 }: { 
   timing?: { totalTimeMs: number; timing: Record<string, number> };
   tracker?: SpeakingSubmissionTracker | null;
+  testId?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
   
-  // Combine timing from completed result and/or tracker - normalize to Record<string, number>
+  // Combine timing from multiple sources in priority order:
+  // 1. Completed result timing (most reliable, persisted in DB)
+  // 2. Active tracker timing (live updates)
+  // 3. Persisted timing from sessionStorage (after tracker was cleared)
   const trackerTiming = tracker?.timing as Record<string, number> | undefined;
-  const displayTiming: Record<string, number> = timing?.timing || trackerTiming || {};
+  const persistedTiming = testId ? getPersistedTiming(testId) : null;
+  const persistedTimingRecord = persistedTiming as Record<string, number> | null;
+  
+  const displayTiming: Record<string, number> = timing?.timing || trackerTiming || persistedTimingRecord || {};
   const totalMs = timing?.totalTimeMs || displayTiming.totalMs || 0;
   
   if (Object.keys(displayTiming).length === 0 && totalMs === 0) return null;
@@ -1289,6 +1298,7 @@ export default function AIPracticeHistory() {
                           <TimingBreakdown 
                             timing={parallelTiming[test.id]} 
                             tracker={clientTracker}
+                            testId={test.id}
                           />
                         </div>
                         

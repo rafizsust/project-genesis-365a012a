@@ -1211,90 +1211,37 @@ REMINDER: There are exactly ${numQ} audio files. Return exactly ${numQ} modelAns
 function calculateBand(result: any): number {
   const c = result.criteria;
   
-  // Step 1: Calculate criterion-based score (fluency, lexical, grammatical, pronunciation)
+  // CRITERIA-DERIVED BAND SCORE (Primary method - official IELTS approach)
+  // The overall band should be the average of the four criteria, rounded to nearest 0.5
   const criterionScores = c ? [
     c.fluency_coherence?.band,
     c.lexical_resource?.band,
     c.grammatical_range?.band,
     c.pronunciation?.band,
-  ].filter(s => typeof s === 'number') : [];
+  ].filter((s: unknown): s is number => typeof s === 'number') : [];
   
-  const criterionAvg = criterionScores.length > 0
-    ? criterionScores.reduce((a: number, b: number) => a + b, 0) / criterionScores.length
-    : 6.0;
+  if (criterionScores.length > 0) {
+    const criterionAvg = criterionScores.reduce((a, b) => a + b, 0) / criterionScores.length;
+    // IELTS rounding: .25 rounds up to .5, .75 rounds up to next whole
+    const rounded = Math.round(criterionAvg * 2) / 2;
+    console.log(`[calculateBand] Criteria scores: ${criterionScores.join(', ')} → avg=${criterionAvg.toFixed(2)} → band=${rounded}`);
+    return rounded;
+  }
   
-  // Step 2: Extract per-question scores from modelAnswers
+  // FALLBACK: If no criteria scores, try to extract from modelAnswers per-question scores
   const modelAnswers = Array.isArray(result.modelAnswers) ? result.modelAnswers : [];
   const questionScores = modelAnswers
-    .map((ma: any) => {
-      const band = ma.estimatedBand ?? ma.estimated_band ?? ma.questionBandScore ?? ma.question_band_score;
-      const partNum = ma.partNumber ?? ma.part_number ?? 1;
-      return { band: typeof band === 'number' ? band : null, partNum };
-    })
-    .filter((qs: any) => qs.band !== null);
+    .map((ma: any) => ma.estimatedBand ?? ma.estimated_band ?? ma.questionBandScore ?? ma.question_band_score)
+    .filter((band: unknown): band is number => typeof band === 'number');
   
-  console.log(`[calculateBand] Criterion avg: ${criterionAvg.toFixed(2)}, Question scores: ${questionScores.length}`);
-  
-  // If no per-question scores, fall back to criterion average
-  if (questionScores.length === 0) {
-    return Math.round(criterionAvg * 2) / 2;
+  if (questionScores.length > 0) {
+    const avg = questionScores.reduce((a: number, b: number) => a + b, 0) / questionScores.length;
+    const rounded = Math.round(avg * 2) / 2;
+    console.log(`[calculateBand] Fallback - question scores avg: ${avg.toFixed(2)} → band=${rounded}`);
+    return rounded;
   }
   
-  // Step 3: Group question scores by part for weighted calculation
-  const scoresByPart: Record<number, number[]> = { 1: [], 2: [], 3: [] };
-  for (const qs of questionScores) {
-    const partNum = qs.partNum;
-    if (partNum >= 1 && partNum <= 3) {
-      scoresByPart[partNum].push(qs.band);
-    }
-  }
-  
-  // Calculate weighted average: each part with questions gets equal weight
-  const partsWithScores = Object.entries(scoresByPart)
-    .filter(([_, scores]) => scores.length > 0)
-    .map(([partNum, scores]) => ({
-      partNum: parseInt(partNum),
-      avgScore: scores.reduce((a, b) => a + b, 0) / scores.length,
-    }));
-  
-  if (partsWithScores.length === 0) {
-    return Math.round(criterionAvg * 2) / 2;
-  }
-  
-  const weightedAvgQuestionScore = partsWithScores.reduce((sum, p) => sum + p.avgScore, 0) / partsWithScores.length;
-  console.log(`[calculateBand] Weighted avg question score: ${weightedAvgQuestionScore.toFixed(2)} from ${partsWithScores.length} parts`);
-  console.log(`[calculateBand] Per-part averages: ${partsWithScores.map(p => `P${p.partNum}=${p.avgScore.toFixed(1)}`).join(', ')}`);
-  
-  // Step 4: Count minimal responses (score <= 2) for penalty caps
-  const minimalCount = questionScores.filter((qs: any) => qs.band <= 2).length;
-  const minimalRatio = minimalCount / questionScores.length;
-  console.log(`[calculateBand] Minimal responses: ${minimalCount}/${questionScores.length} (${(minimalRatio * 100).toFixed(0)}%)`);
-  
-  // Apply penalty caps based on minimal response count
-  let maxAllowedBand = 9.0;
-  if (minimalRatio >= 0.5) {
-    maxAllowedBand = 4.0; // 50% or more minimal responses
-    console.log(`[calculateBand] Capping band to ${maxAllowedBand} due to ${(minimalRatio * 100).toFixed(0)}% minimal responses`);
-  } else if (minimalRatio >= 0.3) {
-    maxAllowedBand = 5.0; // 30% or more minimal responses
-    console.log(`[calculateBand] Capping band to ${maxAllowedBand} due to ${(minimalRatio * 100).toFixed(0)}% minimal responses`);
-  }
-  
-  // Step 5: Calculate final band
-  // Add a small bonus (max 0.5) from criterion scores, but question scores are primary
-  const bonusFromCriteria = Math.min(0.5, Math.max(0, (criterionAvg - weightedAvgQuestionScore) / 2));
-  const questionBasedBand = Math.round((weightedAvgQuestionScore + bonusFromCriteria) * 2) / 2;
-  console.log(`[calculateBand] Question-based band: ${questionBasedBand} (weighted avg: ${weightedAvgQuestionScore.toFixed(1)}, criteria bonus: ${bonusFromCriteria.toFixed(2)})`);
-  
-  // Take the lower of question-based and criterion-based scores
-  let overallBand = Math.min(questionBasedBand, Math.round(criterionAvg * 2) / 2);
-  
-  // Apply the cap for minimal responses
-  if (overallBand > maxAllowedBand) {
-    console.log(`[calculateBand] Reducing overall band from ${overallBand} to ${maxAllowedBand} due to minimal responses cap`);
-    overallBand = maxAllowedBand;
-  }
-  
-  console.log(`[calculateBand] FINAL overall band: ${overallBand}`);
-  return overallBand;
+  // Default fallback
+  console.log('[calculateBand] No scores found, returning default 6.0');
+  return 6.0;
 }

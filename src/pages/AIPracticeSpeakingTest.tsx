@@ -1205,7 +1205,20 @@ export default function AIPracticeSpeakingTest() {
           if (testId) deleteAudioSegments(testId).catch(() => {});
           
           // Mark that we want to navigate after ending audio completes
+          // CRITICAL: Set this BEFORE firing the edge function so the ending audio
+          // onEnd handler knows to navigate instead of calling submitTest again
           pendingNavigationRef.current = true;
+          
+          // Safety: If ending audio already finished (unlikely but possible race),
+          // navigate immediately instead of waiting forever
+          if (endingAudioCompleteRef.current && !exitRequestedRef.current && isMountedRef.current) {
+            console.log('[AIPracticeSpeakingTest] Ending audio already complete - navigating immediately');
+            setPhase('done');
+            exitFullscreen().then(() => {
+              navigate('/ai-practice/history');
+            });
+            // Still fire the edge function, but we're already navigating
+          }
 
           // Fire the edge function call in the background (fire-and-forget)
           // The History page will pick up updates via realtime subscription + tracker
@@ -1805,7 +1818,7 @@ export default function AIPracticeSpeakingTest() {
       setTimeLeft(TIMING.PART3_QUESTION);
       startRecording();
     } else if (currentPhase === 'ending') {
-      // Ending audio has completed - now submit test (which was deferred)
+      // Ending audio has completed - handle navigation based on mode
       // Clear safety timeout since audio completed normally
       if (presetAudioTimersRef.current.endingSafety) {
         window.clearTimeout(presetAudioTimersRef.current.endingSafety);
@@ -1813,16 +1826,21 @@ export default function AIPracticeSpeakingTest() {
       }
       endingAudioCompleteRef.current = true;
       
-      // If parallel submission already fired and we're waiting to navigate, do it now
+      // ACCURACY MODE: Navigate immediately since submission already fired in background
+      // The pendingNavigationRef is set when accuracy mode's fire-and-forget call was made
       if (pendingNavigationRef.current && !exitRequestedRef.current && isMountedRef.current) {
+        console.log('[AIPracticeSpeakingTest] Ending audio complete - navigating to History (accuracy mode)');
         setPhase('done');
         exitFullscreen().then(() => {
           navigate('/ai-practice/history');
         });
-      } else {
-        // Otherwise, submit now (for basic mode or if parallel mode hasn't started yet)
-        submitTest();
+        return;
       }
+      
+      // BASIC MODE: Submit now (synchronous flow)
+      // Or fallback if parallel submission hasn't started yet for some reason
+      console.log('[AIPracticeSpeakingTest] Ending audio complete - submitting test (basic mode)');
+      submitTest();
     }
   };
 
