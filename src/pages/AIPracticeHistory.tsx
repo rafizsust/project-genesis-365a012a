@@ -130,9 +130,12 @@ function LiveElapsedTime({ startTime }: { startTime: string }) {
 }
 
 // Get stage label for display
-function getStageLabel(stage: string | null | undefined, currentPart?: number): string {
+function getStageLabel(stage: string | null | undefined, currentPart?: number, totalParts?: number): string {
+  const parts = totalParts && totalParts > 0 ? totalParts : 3;
+  const partLabel = (p: number) => `Evaluating Part ${p}/${parts}`;
+
   if (!stage) return 'Processing...';
-  
+
   switch (stage) {
     case 'pending_upload':
     case 'pending':
@@ -141,13 +144,17 @@ function getStageLabel(stage: string | null | undefined, currentPart?: number): 
       return 'Uploading audio';
     case 'transcribing':
       return 'Transcribing';
-    case 'evaluating_part_1':
+
+    // Text-based evaluation pipeline
+    case 'evaluating_text':
     case 'evaluating':
-      return currentPart ? `Evaluating Part ${currentPart}/3` : 'Evaluating Part 1/3';
+    case 'evaluating_part_1':
+      return partLabel(currentPart && currentPart > 0 ? currentPart : 1);
     case 'evaluating_part_2':
-      return 'Evaluating Part 2/3';
+      return partLabel(2);
     case 'evaluating_part_3':
-      return 'Evaluating Part 3/3';
+      return partLabel(3);
+
     case 'generating_feedback':
     case 'generating':
       return 'Generating feedback';
@@ -156,6 +163,8 @@ function getStageLabel(stage: string | null | undefined, currentPart?: number): 
       return 'Saving results';
     case 'completed':
       return 'Complete';
+    case 'cancelled':
+      return 'Cancelled';
     default:
       return 'Processing...';
   }
@@ -523,9 +532,10 @@ export default function AIPracticeHistory() {
 
   const handleCancelEvaluation = async (testId: string) => {
     const pendingJob = pendingEvaluations.get(testId);
-    if (!pendingJob) return;
 
-    setCancellingJobId(pendingJob.id);
+    // If we don't yet have the job in local state (fresh submission / just navigated),
+    // still allow cancel-by-testId (the edge function supports it).
+    setCancellingJobId(pendingJob?.id || testId);
     try {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) {
@@ -534,7 +544,7 @@ export default function AIPracticeHistory() {
       }
 
       const response = await supabase.functions.invoke('cancel-speaking-job', {
-        body: { jobId: pendingJob.id },
+        body: pendingJob?.id ? { jobId: pendingJob.id } : { testId },
       });
 
       if (response.error) {
@@ -608,7 +618,7 @@ export default function AIPracticeHistory() {
   };
 
   // Handle resubmit (uses stored R2 audio, single API call)
-  const handleResubmit = async (testId: string) => {
+  const handleResubmit = async (testId: string, evaluationMode: 'basic' | 'accuracy') => {
     setParallelResubmitting(testId);
     
     try {
@@ -624,7 +634,7 @@ export default function AIPracticeHistory() {
       });
 
       const response = await supabase.functions.invoke('resubmit-parallel', {
-        body: { testId },
+        body: { testId, evaluationMode: resubmitEvaluationMode },
       });
 
       if (response.error) {

@@ -214,9 +214,10 @@ serve(async (req) => {
       });
     }
 
-    const { testId, jobId } = await req.json() as {
+    const { testId, jobId, evaluationMode } = await req.json() as {
       testId: string;
       jobId?: string;
+      evaluationMode?: 'basic' | 'accuracy';
     };
 
     if (!testId) {
@@ -231,16 +232,18 @@ serve(async (req) => {
     // STEP 1: Find existing job with file_paths
     const fetchJobStart = Date.now();
     let filePaths: Record<string, string> = {};
+    let durations: Record<string, number> = {};
+    let fluencyFlag: boolean | undefined;
     let topic: string | undefined;
     let difficulty: string | undefined;
 
     if (jobId) {
-      const { data: job, error: jobError } = await supabaseService
-        .from('speaking_evaluation_jobs')
-        .select('file_paths, topic, difficulty')
-        .eq('id', jobId)
-        .eq('user_id', user.id)
-        .single();
+        const { data: job, error: jobError } = await supabaseService
+          .from('speaking_evaluation_jobs')
+          .select('file_paths, durations, fluency_flag, topic, difficulty')
+          .eq('id', jobId)
+          .eq('user_id', user.id)
+          .single();
 
       if (jobError || !job) {
         console.error('[resubmit-parallel] Job not found:', jobError);
@@ -250,13 +253,15 @@ serve(async (req) => {
         });
       }
       filePaths = (job.file_paths as Record<string, string>) || {};
+      durations = (job.durations as Record<string, number>) || {};
+      fluencyFlag = typeof job.fluency_flag === 'boolean' ? job.fluency_flag : undefined;
       topic = job.topic || undefined;
       difficulty = job.difficulty || undefined;
     } else {
       // Find most recent completed job for this test
       const { data: jobs } = await supabaseService
         .from('speaking_evaluation_jobs')
-        .select('file_paths, topic, difficulty')
+        .select('file_paths, durations, fluency_flag, topic, difficulty')
         .eq('test_id', testId)
         .eq('user_id', user.id)
         .eq('status', 'completed')
@@ -265,6 +270,8 @@ serve(async (req) => {
 
       if (jobs && jobs.length > 0) {
         filePaths = (jobs[0].file_paths as Record<string, string>) || {};
+        durations = (jobs[0].durations as Record<string, number>) || {};
+        fluencyFlag = typeof (jobs[0] as any).fluency_flag === 'boolean' ? (jobs[0] as any).fluency_flag : undefined;
         topic = jobs[0].topic || undefined;
         difficulty = jobs[0].difficulty || undefined;
       }
@@ -315,7 +322,37 @@ serve(async (req) => {
     topic = topic || testRow.topic;
     difficulty = difficulty || testRow.difficulty;
 
-    // STEP 3: Download audio files from R2
+    // STEP 3: Re-queue evaluation using the async job pipeline so the UI can show stage-by-stage progress
+    const resubmitMode = evaluationMode || 'accuracy';
+    console.log(`[resubmit-parallel] Re-queuing evaluation via evaluate-speaking-async (mode=${resubmitMode})`);
+
+    const { data: asyncData, error: asyncErr } = await supabaseClient.functions.invoke('evaluate-speaking-async', {
+      body: {
+        testId,
+        filePaths,
+        durations,
+        topic,
+        difficulty,
+        fluencyFlag,
+        cancelExisting: true,
+        evaluationMode: resubmitMode,
+      },
+    });
+
+    if (asyncErr) {
+      console.error('[resubmit-parallel] Failed to queue async evaluation:', asyncErr);
+      return new Response(JSON.stringify({ error: asyncErr.message || 'Failed to queue evaluation', code: 'QUEUE_FAILED' }), {
+        status: 500,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    return new Response(JSON.stringify({ success: true, queued: true, ...asyncData }), {
+      status: 200,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+
+    // STEP 3 (legacy): Download audio files from R2
     const downloadStart = Date.now();
     const audioFiles: { key: string; bytes: Uint8Array; mimeType: string }[] = [];
     

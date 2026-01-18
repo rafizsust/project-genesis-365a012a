@@ -100,18 +100,27 @@ const EVALUATION_STAGES = [
 
 function getActiveStageIndex(stage: 'queued' | 'processing', currentPart: number, jobStage?: string | null): number {
   if (stage === 'queued') return 0;
-  
-  // Map job stage to index
-  if (jobStage === 'uploading') return 1;
-  if (jobStage === 'transcribing') return 2;
-  if (jobStage === 'generating_feedback' || jobStage === 'generating') return 6;
-  if (jobStage === 'finalizing' || jobStage === 'saving') return 7;
-  
-  // Use currentPart for evaluation stages
-  if (currentPart === 1) return 3;
-  if (currentPart === 2) return 4;
-  if (currentPart === 3) return 5;
-  
+
+  const js = String(jobStage || '');
+
+  // Map explicit job stages
+  if (js === 'uploading') return 1;
+  if (js === 'transcribing') return 2;
+  if (js === 'generating_feedback' || js === 'generating') return 6;
+  if (js === 'finalizing' || js === 'saving') return 7;
+
+  // Map part-specific stages if present
+  if (js === 'evaluating_part_1') return 3;
+  if (js === 'evaluating_part_2') return 4;
+  if (js === 'evaluating_part_3') return 5;
+
+  // Text-based pipeline sometimes reports 'evaluating_text' with current_part
+  if (js === 'evaluating_text' || js === 'evaluating') {
+    if (currentPart === 2) return 4;
+    if (currentPart === 3) return 5;
+    return 3;
+  }
+
   // Default to first evaluation stage if processing
   return 3;
 }
