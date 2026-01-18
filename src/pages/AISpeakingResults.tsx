@@ -578,6 +578,36 @@ export default function AISpeakingResults() {
   }
 
   if (!result) {
+    // If not loading and not waiting, show a helpful message with retry option
+    if (!loading && !isWaiting) {
+      return (
+        <div className="min-h-screen flex flex-col bg-background">
+          <Navbar />
+          <main className="flex-1 flex items-center justify-center p-4">
+            <Card className="max-w-md w-full">
+              <CardContent className="py-8 text-center">
+                <AlertCircle className="w-12 h-12 text-warning mx-auto mb-4" />
+                <h2 className="text-xl font-bold mb-2">Result Not Found</h2>
+                <p className="text-muted-foreground mb-4">
+                  We couldn't find your evaluation result. It may still be processing or there was an issue.
+                </p>
+                <div className="flex gap-3 justify-center flex-wrap">
+                  <Button variant="outline" onClick={() => navigate('/ai-practice')}>
+                    <Home className="w-4 h-4 mr-2" />
+                    Go Back
+                  </Button>
+                  <Button onClick={() => window.location.reload()}>
+                    <RotateCcw className="w-4 h-4 mr-2" />
+                    Refresh
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          </main>
+        </div>
+      );
+    }
+    
     return (
       <div className="min-h-screen flex flex-col bg-background">
         <Navbar />

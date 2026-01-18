@@ -507,7 +507,7 @@ serve(async (req) => {
 
           const model = genAI.getGenerativeModel({ 
             model: modelName,
-            generationConfig: { temperature: 0.3, maxOutputTokens: 65000 },
+            generationConfig: { temperature: 0.3, maxOutputTokens: 100000 },
           });
 
           // Build content parts with proper typing for Gemini API
@@ -517,13 +517,16 @@ serve(async (req) => {
           ];
           let lastQuotaError: QuotaError | null = null;
 
-          for (let attempt = 0; attempt < 2; attempt++) {
+          // Try up to 3 times if response is incomplete (missing modelAnswers/transcripts)
+          for (let attempt = 0; attempt < 3; attempt++) {
             try {
+              console.log(`[evaluate-speaking-parallel] Attempt ${attempt + 1} with model ${modelName}`);
               // Use any type for the request to avoid strict typing issues with the Gemini SDK
               const result = await model.generateContent({ contents: [{ role: 'user', parts: contentParts }] } as any);
               const responseText = result.response?.text();
               
               if (responseText) {
+                console.log(`[evaluate-speaking-parallel] Response length: ${responseText.length} chars`);
                 const parsed = parseJson(responseText);
                 if (parsed) {
                   const normalized = normalizeGeminiResponse(parsed) as EvaluationResult;
@@ -533,16 +536,36 @@ serve(async (req) => {
                     evaluationResult = normalized;
                     usedModel = modelName;
                     usedKey = candidateKey;
+                    console.log(`[evaluate-speaking-parallel] Valid result on attempt ${attempt + 1}`);
                     break;
                   } else {
-                    console.warn(`[evaluate-speaking-parallel] Validation issues: ${validation.issues.join(', ')}`);
+                    console.warn(`[evaluate-speaking-parallel] Validation issues (attempt ${attempt + 1}): ${validation.issues.join(', ')}`);
                     const overallBand = normalized.overall_band ?? normalized.overallBand;
                     const hasSomeCriteria = normalized.criteria && Object.keys(normalized.criteria).length > 0;
+                    const modelAnswersCount = Array.isArray(normalized.modelAnswers) ? normalized.modelAnswers.length : 0;
                     
+                    // Accept if we have band, criteria, AND at least some modelAnswers
+                    if (typeof overallBand === 'number' && overallBand > 0 && hasSomeCriteria && modelAnswersCount > 0) {
+                      evaluationResult = normalized;
+                      usedModel = modelName;
+                      usedKey = candidateKey;
+                      console.log(`[evaluate-speaking-parallel] Accepted partial result with ${modelAnswersCount} modelAnswers`);
+                      break;
+                    }
+                    
+                    // If missing modelAnswers entirely, retry on next attempt
+                    if (modelAnswersCount === 0 && attempt < 2) {
+                      console.log(`[evaluate-speaking-parallel] No modelAnswers, retrying...`);
+                      await sleep(1000);
+                      continue;
+                    }
+                    
+                    // Last resort: accept any result with band and criteria
                     if (typeof overallBand === 'number' && overallBand > 0 && hasSomeCriteria) {
                       evaluationResult = normalized;
                       usedModel = modelName;
                       usedKey = candidateKey;
+                      console.warn(`[evaluate-speaking-parallel] Accepted result without modelAnswers on final attempt`);
                       break;
                     }
                   }
