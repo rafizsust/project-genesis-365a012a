@@ -46,6 +46,7 @@ export type Database = {
           band_score: number | null
           completed_at: string
           created_at: string
+          evaluation_timing: Json | null
           id: string
           module: string
           question_results: Json
@@ -60,6 +61,7 @@ export type Database = {
           band_score?: number | null
           completed_at?: string
           created_at?: string
+          evaluation_timing?: Json | null
           id?: string
           module: string
           question_results?: Json
@@ -74,6 +76,7 @@ export type Database = {
           band_score?: number | null
           completed_at?: string
           created_at?: string
+          evaluation_timing?: Json | null
           id?: string
           module?: string
           question_results?: Json

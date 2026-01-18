@@ -616,8 +616,21 @@ serve(async (req) => {
 
     evaluationResult.overall_band = overallBand;
 
-    // Save result
+    // Save result - first delete any existing result for this test
     const saveStart = Date.now();
+    
+    // Delete existing results for this test to avoid duplicates
+    await supabaseService
+      .from('ai_practice_results')
+      .delete()
+      .eq('test_id', testId)
+      .eq('user_id', user.id)
+      .eq('module', 'speaking');
+    
+    console.log(`[resubmit-parallel] Deleted old results for test ${testId}`);
+    
+    const totalTimeMs = Date.now() - startTime;
+    
     const { data: resultRow, error: saveError } = await supabaseService
       .from('ai_practice_results')
       .insert({
@@ -636,6 +649,10 @@ serve(async (req) => {
           file_paths: filePaths,
           parallel_mode: true,
         },
+        evaluation_timing: {
+          totalTimeMs,
+          timing,
+        },
         completed_at: new Date().toISOString(),
       })
       .select()
@@ -646,7 +663,6 @@ serve(async (req) => {
       console.error('[resubmit-parallel] Save error:', saveError);
     }
 
-    const totalTimeMs = Date.now() - startTime;
     console.log(`[resubmit-parallel] ====== COMPLETE in ${totalTimeMs}ms ======`);
     console.log(`[resubmit-parallel] Timing breakdown:`, JSON.stringify(timing));
 
