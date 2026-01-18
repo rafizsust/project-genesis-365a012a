@@ -1130,22 +1130,61 @@ export default function AIPracticeHistory() {
                                 Evaluation Failed
                               </Badge>
                             )}
-                            {/* Client-side uploading progress (before DB job exists) */}
-                            {isClientUploading && clientTracker && (
-                              <Badge variant="outline" className="gap-1 text-xs border-primary/50 text-primary">
-                                {clientTracker.stage === 'uploading' ? (
-                                  <Upload className="w-3 h-3 animate-pulse" />
-                                ) : clientTracker.stage === 'converting' ? (
-                                  <AudioLines className="w-3 h-3 animate-pulse" />
-                                ) : (
-                                  <Loader2 className="w-3 h-3 animate-spin" />
+                            {/* Client-side progress stages (before/during evaluation) */}
+                            {clientTracker && ['preparing', 'converting', 'uploading', 'queuing', 'evaluating'].includes(clientTracker.stage) && (
+                              <Badge variant="outline" className="gap-1.5 text-xs border-primary/50 text-primary animate-pulse">
+                                {clientTracker.stage === 'preparing' && (
+                                  <>
+                                    <Loader2 className="w-3 h-3 animate-spin" />
+                                    <span>Preparing...</span>
+                                  </>
                                 )}
-                                {clientTracker.stage === 'converting' ? 'Converting audio...' :
-                                 clientTracker.stage === 'uploading' ? 'Uploading...' :
-                                 clientTracker.stage === 'queuing' ? 'Queuing...' : 'Preparing...'}
+                                {clientTracker.stage === 'converting' && (
+                                  <>
+                                    <AudioLines className="w-3 h-3 animate-pulse" />
+                                    <span>Converting audio...</span>
+                                    {clientTracker.timing?.conversionMs && (
+                                      <span className="text-muted-foreground">
+                                        ({Math.round((clientTracker.timing as Record<string, number>).conversionMs / 1000)}s)
+                                      </span>
+                                    )}
+                                  </>
+                                )}
+                                {clientTracker.stage === 'uploading' && (
+                                  <>
+                                    <Upload className="w-3 h-3 animate-pulse" />
+                                    <span>Uploading...</span>
+                                  </>
+                                )}
+                                {clientTracker.stage === 'queuing' && (
+                                  <>
+                                    <Clock className="w-3 h-3 animate-pulse" />
+                                    <span>Queuing...</span>
+                                  </>
+                                )}
+                                {clientTracker.stage === 'evaluating' && (
+                                  <>
+                                    <Zap className="w-3 h-3 animate-pulse" />
+                                    <span>AI Evaluating...</span>
+                                    {clientTracker.timing?.conversionMs && (
+                                      <span className="text-muted-foreground text-[10px]">
+                                        (conv: {Math.round((clientTracker.timing as Record<string, number>).conversionMs / 1000)}s)
+                                      </span>
+                                    )}
+                                  </>
+                                )}
                               </Badge>
                             )}
-                            {!hasResult && !hasFailedSub && !isPendingEval && !isClientUploading && (
+                            {/* Completed stage indicator with timing */}
+                            {clientTracker?.stage === 'completed' && clientTracker.timing && (
+                              <Badge variant="outline" className="gap-1.5 text-xs border-success/50 text-success">
+                                <Zap className="w-3 h-3" />
+                                <span>
+                                  {Math.round(((clientTracker.timing as Record<string, number>).totalMs || 0) / 1000)}s
+                                </span>
+                              </Badge>
+                            )}
+                            {!hasResult && !hasFailedSub && !isPendingEval && !clientTracker && (
                               <Badge variant="outline" className="gap-1 text-xs border-warning/50 text-warning">
                                 <AlertCircle className="w-3 h-3" />
                                 Not Submitted
@@ -1189,15 +1228,42 @@ export default function AIPracticeHistory() {
                             <span title="Last updated">
                               {format(lastUpdated, 'MMM d, yyyy h:mm a')}
                             </span>
-                            {/* Processing time display */}
+                            {/* Processing time display - use tracker timing if available, fallback to DB timestamps */}
                             {hasResult && result?.completed_at && (
                               <span className="flex items-center gap-1 text-success">
                                 <Timer className="w-3 h-3" />
                                 {(() => {
-                                  // Use result lifecycle timestamps (not test generation time).
+                                  // First check if we have timing from tracker (accuracy mode)
+                                  const trackerTiming = clientTracker?.timing as Record<string, number> | undefined;
+                                  const parallelTimingData = parallelTiming[test.id];
+                                  
+                                  // Prefer totalMs from parallel timing, then tracker
+                                  const totalMs = parallelTimingData?.totalTimeMs || 
+                                                  trackerTiming?.totalMs || 
+                                                  0;
+                                  
+                                  // If we have actual timing data, show it
+                                  if (totalMs > 0) {
+                                    if (totalMs < 60000) {
+                                      return `${Math.round(totalMs / 1000)}s`;
+                                    } else if (totalMs < 3600000) {
+                                      const mins = Math.floor(totalMs / 60000);
+                                      const secs = Math.round((totalMs % 60000) / 1000);
+                                      return `${mins}m ${secs}s`;
+                                    } else {
+                                      const hours = Math.floor(totalMs / 3600000);
+                                      const mins = Math.floor((totalMs % 3600000) / 60000);
+                                      return `${hours}h ${mins}m`;
+                                    }
+                                  }
+                                  
+                                  // Fallback to DB timestamps
                                   const startedAt = new Date((result as any).created_at || result.completed_at).getTime();
                                   const completedAt = new Date(result.completed_at).getTime();
                                   const durationMs = Math.max(0, completedAt - startedAt);
+
+                                  // Don't show 0s - it's misleading
+                                  if (durationMs === 0) return null;
 
                                   if (durationMs < 60000) {
                                     return `${Math.round(durationMs / 1000)}s`;

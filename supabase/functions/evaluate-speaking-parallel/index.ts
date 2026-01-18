@@ -671,6 +671,21 @@ serve(async (req) => {
       console.warn('[evaluate-speaking-parallel] Background upload failed, proceeding without audio URLs:', uploadErr);
     }
 
+    // Delete any existing results for this test BEFORE inserting new one
+    // This ensures only the latest evaluation is shown
+    const { error: deleteError } = await supabaseService
+      .from('ai_practice_results')
+      .delete()
+      .eq('test_id', testId)
+      .eq('user_id', user.id)
+      .eq('module', 'speaking');
+    
+    if (deleteError) {
+      console.warn('[evaluate-speaking-parallel] Failed to delete old results:', deleteError.message);
+    } else {
+      console.log('[evaluate-speaking-parallel] Deleted old results for test:', testId);
+    }
+
     // Save result
     const { data: resultRow, error: saveError } = await supabaseService
       .from('ai_practice_results')

@@ -996,30 +996,28 @@ export default function AIPracticeSpeakingTest() {
     }
   };
 
+  // Track if ending audio has completed (for proper navigation timing)
+  const endingAudioCompleteRef = useRef(false);
+  const pendingNavigationRef = useRef(false);
+  
   const endTest = () => {
     setTimeLeft(0);
     setPhase('ending');
+    endingAudioCompleteRef.current = false;
+    pendingNavigationRef.current = false;
 
-    // Start submission immediately after recordings are complete.
-    // We still play the ending audio for UX, but we do NOT wait for it to finish.
-    // This addresses the "why wait for audio to finish" issue.
-    try {
-      // Fire-and-forget; navigation happens inside submitTest.
-      void submitTest();
-    } catch {
-      // ignore
-    }
-
+    // Play the ending audio first - we'll wait for it to complete before navigating
     speakText('Thank you. That is the end of the speaking test.', 'test_ending');
 
     // Safety timeout: if TTS/audio fails and completion callback never fires,
-    // auto-submit after 10 seconds to prevent getting stuck in 'ending' phase
+    // auto-submit after 15 seconds to prevent getting stuck in 'ending' phase
     const safetyTimeout = window.setTimeout(() => {
       if (phaseRef.current === 'ending' && !exitRequestedRef.current) {
-        console.warn('[AIPracticeSpeakingTest] Safety timeout triggered - submitting test after audio failure');
+        console.warn('[AIPracticeSpeakingTest] Safety timeout triggered - submitting test after audio timeout');
+        endingAudioCompleteRef.current = true;
         void submitTest();
       }
-    }, 10000);
+    }, 15000);
 
     // Store timeout ID so it can be cleared if normal completion happens
     presetAudioTimersRef.current.endingSafety = safetyTimeout;
@@ -1191,27 +1189,23 @@ export default function AIPracticeSpeakingTest() {
           const evaluationStartTime = Date.now();
 
           // =====================================================================
-          // IMMEDIATE REDIRECT: Fire the edge function call but don't wait for it.
-          // Navigate to history page immediately and let the tracker + realtime
-          // subscriptions show progress/completion to the user.
+          // WAIT FOR ENDING AUDIO: Mark submission as started, then wait for
+          // the ending audio to complete before navigating.
           // =====================================================================
           
           // Track topic completion early (user has completed the speaking part)
           if (test?.topic) incrementCompletion(test.topic);
           
           toast({
-            title: 'Submitting for Evaluation',
-            description: 'Your test has been submitted. Check history for progress.',
+            title: 'Processing',
+            description: 'Your test is being processed. Please wait for the audio to finish...',
           });
 
           // Delete persisted audio (we've captured it in audioData already)
           if (testId) deleteAudioSegments(testId).catch(() => {});
-
-          // Navigate immediately to history
-          if (!exitRequestedRef.current && isMountedRef.current) {
-            await exitFullscreen();
-            navigate('/ai-practice/history');
-          }
+          
+          // Mark that we want to navigate after ending audio completes
+          pendingNavigationRef.current = true;
 
           // Fire the edge function call in the background (fire-and-forget)
           // The History page will pick up updates via realtime subscription + tracker
@@ -1243,8 +1237,19 @@ export default function AIPracticeSpeakingTest() {
               console.log(`[AIPracticeSpeakingTest] ✅ Parallel evaluation complete (background)!`);
               console.log(`[AIPracticeSpeakingTest] Timing: conversion=${conversionTimeMs}ms, evaluation=${evaluationTimeMs}ms, total=${totalTimeMs}ms`);
               
-              // Clear tracker on success - History page will pick up from realtime subscription
-              if (testId) clearSpeakingSubmissionTracker(testId);
+              // Update tracker with final timing data BEFORE clearing, so History can display it
+              if (testId) {
+                patchSpeakingSubmissionTracker(testId, {
+                  stage: 'completed' as SpeakingSubmissionStage,
+                  timing: {
+                    conversionMs: conversionTimeMs,
+                    evaluationMs: evaluationTimeMs,
+                    totalMs: totalTimeMs,
+                  },
+                });
+                // Clear after a short delay so the timing can be captured
+                setTimeout(() => clearSpeakingSubmissionTracker(testId), 2000);
+              }
             } else if (data?.error) {
               console.error('[AIPracticeSpeakingTest] Parallel evaluation returned error:', data.error);
               if (testId) {
@@ -1265,7 +1270,8 @@ export default function AIPracticeSpeakingTest() {
           });
 
           // Mark as success to skip fallback async flow
-          setPhase('done');
+          // DON'T set phase to 'done' yet - we're waiting for ending audio
+          // setPhase('done'); // Removed - handled by ending audio completion
           parallelSuccess = true;
           return; // Exit early - accuracy mode initiated
           
@@ -1531,16 +1537,19 @@ export default function AIPracticeSpeakingTest() {
           description: 'Your speaking test is being evaluated. Check your history for results.',
         });
 
-        setPhase('done');
-        
         // Clear tracker - job is now in DB, History will poll via realtime
         if (testId) clearSpeakingSubmissionTracker(testId);
-
-        // Navigate to history page - results will appear when ready
-        if (!exitRequestedRef.current && isMountedRef.current) {
+        
+        // Mark that we want to navigate after ending audio completes
+        pendingNavigationRef.current = true;
+        
+        // If ending audio has already completed, navigate immediately
+        if (endingAudioCompleteRef.current && !exitRequestedRef.current && isMountedRef.current) {
+          setPhase('done');
           await exitFullscreen();
           navigate('/ai-practice/history');
         }
+        // Otherwise, the handleTTSCompleteRef will handle navigation when audio ends
       } else if (data?.error) {
         throw new Error(data.error);
       } else {
@@ -1796,7 +1805,24 @@ export default function AIPracticeSpeakingTest() {
       setTimeLeft(TIMING.PART3_QUESTION);
       startRecording();
     } else if (currentPhase === 'ending') {
-      submitTest();
+      // Ending audio has completed - now submit test (which was deferred)
+      // Clear safety timeout since audio completed normally
+      if (presetAudioTimersRef.current.endingSafety) {
+        window.clearTimeout(presetAudioTimersRef.current.endingSafety);
+        presetAudioTimersRef.current.endingSafety = undefined;
+      }
+      endingAudioCompleteRef.current = true;
+      
+      // If parallel submission already fired and we're waiting to navigate, do it now
+      if (pendingNavigationRef.current && !exitRequestedRef.current && isMountedRef.current) {
+        setPhase('done');
+        exitFullscreen().then(() => {
+          navigate('/ai-practice/history');
+        });
+      } else {
+        // Otherwise, submit now (for basic mode or if parallel mode hasn't started yet)
+        submitTest();
+      }
     }
   };
 
