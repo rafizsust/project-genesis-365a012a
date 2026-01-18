@@ -25,6 +25,7 @@ import {
   getSpeakingSubmissionTracker,
   type SpeakingSubmissionTracker,
 } from '@/lib/speakingSubmissionTracker';
+import { InlineProgressBanner } from '@/components/common/InlineProgressBanner';
 import { 
   BookOpen, 
   Headphones, 
@@ -129,47 +130,7 @@ function LiveElapsedTime({ startTime }: { startTime: string }) {
   );
 }
 
-// Get stage label for display
-function getStageLabel(stage: string | null | undefined, currentPart?: number, totalParts?: number): string {
-  const parts = totalParts && totalParts > 0 ? totalParts : 3;
-  const partLabel = (p: number) => `Evaluating Part ${p}/${parts}`;
-
-  if (!stage) return 'Processing...';
-
-  switch (stage) {
-    case 'pending_upload':
-    case 'pending_text_eval':
-    case 'pending':
-      return 'Queued';
-    case 'uploading':
-      return 'Uploading audio';
-    case 'transcribing':
-      return 'Transcribing';
-
-    // Text-based evaluation pipeline
-    case 'evaluating_text':
-    case 'evaluating':
-    case 'evaluating_part_1':
-      return partLabel(currentPart && currentPart > 0 ? currentPart : 1);
-    case 'evaluating_part_2':
-      return partLabel(2);
-    case 'evaluating_part_3':
-      return partLabel(3);
-
-    case 'generating_feedback':
-    case 'generating':
-      return 'Generating feedback';
-    case 'finalizing':
-    case 'saving':
-      return 'Saving results';
-    case 'completed':
-      return 'Complete';
-    case 'cancelled':
-      return 'Cancelled';
-    default:
-      return 'Processing...';
-  }
-}
+// Stage labels moved to InlineProgressBanner component
 
 
 
@@ -1019,38 +980,32 @@ export default function AIPracticeHistory() {
                                 )}
                               </div>
                               
-                               {/* Status Badges Row */}
-                               {(isEvaluating || isPendingEval || isClientProgressing || hasFailedSub || (!hasResult && !isPendingEval && !clientTracker)) && (
-                                 <div className="flex items-center gap-2 mt-2 flex-wrap">
-                                   {/* Evaluating status with stage (server job) */}
-                                   {isEvaluating && pendingJob && (
-                                     <Badge variant="outline" className="gap-1.5 text-xs border-primary/40 text-primary animate-pulse">
-                                       <Loader2 className="w-3 h-3 animate-spin" />
-                                       {getStageLabel(pendingJob.stage, pendingJob.current_part)}
-                                     </Badge>
-                                   )}
-                                   
-                                   {/* Client-side progress (accuracy/parallel mode or early upload stages) */}
-                                   {!isEvaluating && isClientProgressing && clientTracker && (
-                                     <Badge variant="outline" className="gap-1.5 text-xs border-primary/40 text-primary animate-pulse">
-                                       <Loader2 className="w-3 h-3 animate-spin" />
-                                       {clientTracker.stage === 'preparing' && 'Preparing...'}
-                                       {clientTracker.stage === 'converting' && 'Converting audio...'}
-                                       {clientTracker.stage === 'uploading' && 'Uploading audio...'}
-                                       {clientTracker.stage === 'queuing' && 'Queued'}
-                                       {clientTracker.stage === 'evaluating' && 'Evaluating'}
-                                       {clientTracker.stage === 'finalizing' && 'Finalizing'}
-                                       {clientTracker.detail ? ` — ${clientTracker.detail}` : ''}
-                                     </Badge>
-                                   )}
-                                   
-                                   {/* Failed/Stale status */}
-                                   {isPendingEval && pendingJob?.status === 'stale' && (
-                                     <Badge variant="outline" className="gap-1 text-xs border-warning/40 text-warning">
-                                       <AlertCircle className="w-3 h-3" />
-                                       Timed Out
-                                     </Badge>
-                                   )}
+                              {/* Inline Progress Banner for active evaluations */}
+                              {(isEvaluating || isClientProgressing) && (
+                                <div className="mt-2">
+                                  <InlineProgressBanner
+                                    stage={isEvaluating && pendingJob ? pendingJob.stage || 'processing' : clientTracker?.stage || 'processing'}
+                                    currentPart={pendingJob?.current_part}
+                                    totalParts={pendingJob?.total_parts}
+                                    progress={pendingJob?.progress}
+                                    startTime={isEvaluating && pendingJob ? pendingJob.created_at : clientTracker?.startedAt ? new Date(clientTracker.startedAt).toISOString() : undefined}
+                                    mode={clientTracker?.mode}
+                                    onCancel={pendingJob && ['pending', 'processing', 'retrying'].includes(pendingJob.status) ? () => handleCancelEvaluation(test.id) : undefined}
+                                    isCancelling={cancellingJobId === pendingJob?.id || cancellingJobId === test.id}
+                                  />
+                                </div>
+                              )}
+                              
+                              {/* Status Badges Row (for non-active states) */}
+                              {!isEvaluating && !isClientProgressing && (isPendingEval || hasFailedSub || (!hasResult && !isPendingEval && !clientTracker)) && (
+                                <div className="flex items-center gap-2 mt-2 flex-wrap">
+                                  {/* Failed/Stale status */}
+                                  {isPendingEval && pendingJob?.status === 'stale' && (
+                                    <Badge variant="outline" className="gap-1 text-xs border-warning/40 text-warning">
+                                      <AlertCircle className="w-3 h-3" />
+                                      Timed Out
+                                    </Badge>
+                                  )}
                                   {isPendingEval && pendingJob?.status === 'failed' && (
                                     <Badge variant="outline" className="gap-1 text-xs border-destructive/40 text-destructive">
                                       <AlertCircle className="w-3 h-3" />
@@ -1090,24 +1045,7 @@ export default function AIPracticeHistory() {
                                 </Button>
                               )}
                               
-                              {/* Cancel button for pending evaluations */}
-                              {pendingJob && ['pending', 'processing', 'retrying'].includes(pendingJob.status) && (
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  onClick={() => handleCancelEvaluation(test.id)}
-                                  disabled={cancellingJobId === pendingJob.id}
-                                  className="h-8 w-8 text-destructive hover:text-destructive"
-                                  title="Cancel"
-                                >
-                                  {cancellingJobId === pendingJob.id ? (
-                                    <Loader2 className="w-4 h-4 animate-spin" />
-                                  ) : (
-                                    <AlertCircle className="w-4 h-4" />
-                                  )}
-                                </Button>
-                              )}
-
+                              {/* Cancel button removed - now in InlineProgressBanner */}
                               {/* Retry button for failed/stale */}
                               {isPendingEval && pendingJob && ['stale', 'failed'].includes(pendingJob.status) && (
                                 <Button
