@@ -1006,7 +1006,9 @@ function getQuestionTypesForModule(module: string, selectedType: string): string
     case "writing":
       return ["TASK_1", "TASK_2"];
     case "speaking":
-      return ["FULL_TEST"];
+      // When mixed, cycle through individual parts rather than defaulting to FULL_TEST
+      // This generates better coverage and uses fewer TTS API calls per test
+      return ["PART_1", "PART_2", "PART_3", "FULL_TEST"];
     default:
       return ["mixed"];
   }
