@@ -1114,7 +1114,7 @@ export default function AIPracticeSpeakingTest() {
       // - Send directly to evaluate-speaking-parallel (skips R2-first upload)
       // - Edge function handles R2 upload + Google File API upload IN PARALLEL
       // =====================================================================
-      if (evaluationMode === 'accuracy') {
+      if (false && evaluationMode === 'accuracy') {
         console.log('[AIPracticeSpeakingTest] ACCURACY MODE: Using true parallel processing');
         
         let parallelSuccess = false;
