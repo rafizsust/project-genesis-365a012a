@@ -301,6 +301,74 @@ export default function AIPracticeHistory() {
     };
   }, [user, toast, navigate, notifyEvaluationComplete, notifyEvaluationFailed, testResults]);
 
+  // Realtime subscription for ai_practice_results - instant updates when results are saved
+  useEffect(() => {
+    if (!user) return;
+
+    const resultsChannel = supabase
+      .channel('ai-practice-results-realtime')
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'ai_practice_results',
+          filter: `user_id=eq.${user.id}`,
+        },
+        (payload: any) => {
+          const newResult = payload.new as AIPracticeResult;
+          if (!newResult) return;
+
+          console.log('[AIPracticeHistory] New result received via realtime:', newResult.id, newResult.test_id);
+
+          // Update testResults state immediately
+          setTestResults((prev) => {
+            // Only update if this is a newer result or we don't have one yet
+            const existing = prev[newResult.test_id];
+            if (existing && new Date(existing.completed_at) >= new Date(newResult.completed_at)) {
+              return prev;
+            }
+            return { ...prev, [newResult.test_id]: newResult };
+          });
+
+          // Remove from pending evaluations if exists
+          setPendingEvaluations((prev) => {
+            if (prev.has(newResult.test_id)) {
+              const updated = new Map(prev);
+              updated.delete(newResult.test_id);
+              return updated;
+            }
+            return prev;
+          });
+
+          // Show toast for speaking/writing results (modules with AI evaluation)
+          if (newResult.module === 'speaking' || newResult.module === 'writing') {
+            toast({
+              title: `✅ ${newResult.module.charAt(0).toUpperCase() + newResult.module.slice(1)} Results Ready!`,
+              description: newResult.band_score 
+                ? `Band ${Number(newResult.band_score).toFixed(1)} achieved.`
+                : 'Your evaluation is complete.',
+              action: (
+                <ToastAction 
+                  altText="View Results"
+                  onClick={() => navigate(`/ai-practice/${newResult.module}/results/${newResult.test_id}`)}
+                >
+                  View
+                </ToastAction>
+              ),
+            });
+          }
+        }
+      )
+      .subscribe((status) => {
+        console.log('[AIPracticeHistory] Results realtime subscription:', status);
+      });
+
+    return () => {
+      supabase.removeChannel(resultsChannel);
+    };
+  }, [user, toast, navigate]);
+
   // Load pending evaluations on mount
   const loadPendingEvaluations = useCallback(async () => {
     if (!user) return;
@@ -1031,10 +1099,24 @@ export default function AIPracticeHistory() {
                               </span>
                             </Button>
                           )}
-                          {/* Timing display for parallel mode results */}
+                          {/* Timing display for parallel mode results with breakdown tooltip */}
                           {parallelTiming[test.id] && (
-                            <Badge variant="outline" className="text-xs gap-1 border-success/50 text-success">
-                              <Timer className="w-3 h-3" />
+                            <Badge 
+                              variant="outline" 
+                              className="text-xs gap-1 border-success/50 text-success cursor-help"
+                              title={(() => {
+                                const t = parallelTiming[test.id];
+                                const parts: string[] = [`Total: ${(t.totalTimeMs / 1000).toFixed(1)}s`];
+                                if (t.timing) {
+                                  if (t.timing.r2UploadMs) parts.push(`R2 Upload: ${(t.timing.r2UploadMs / 1000).toFixed(1)}s`);
+                                  if (t.timing.googleUploadMs) parts.push(`Google Upload: ${(t.timing.googleUploadMs / 1000).toFixed(1)}s`);
+                                  if (t.timing.evaluationMs) parts.push(`AI Evaluation: ${(t.timing.evaluationMs / 1000).toFixed(1)}s`);
+                                  if (t.timing.saveResultMs) parts.push(`Save Result: ${(t.timing.saveResultMs / 1000).toFixed(1)}s`);
+                                }
+                                return parts.join('\n');
+                              })()}
+                            >
+                              <Zap className="w-3 h-3" />
                               {(parallelTiming[test.id].totalTimeMs / 1000).toFixed(1)}s
                             </Badge>
                           )}

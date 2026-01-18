@@ -1082,142 +1082,194 @@ export default function AIPracticeSpeakingTest() {
       // =====================================================================
       if (evaluationMode === 'accuracy') {
         console.log('[AIPracticeSpeakingTest] ACCURACY MODE: Using true parallel processing');
-        setSubmissionProgress({ 
-          step: 'Converting Audio', 
-          detail: `Converting ${totalAudioFiles} audio files in parallel...`, 
-          currentItem: 0, 
-          totalItems: totalAudioFiles 
-        });
-
-        // Convert all audio to MP3 base64 IN PARALLEL
-        const conversionStartTime = Date.now();
-        const conversionPromises = keys.map(async (key) => {
-          const seg = segments[key];
-          const inferredType = seg.chunks?.[0]?.type || 'audio/webm';
-          const blob = new Blob(seg.chunks, { type: inferredType });
-          
-          if (blob.size === 0) {
-            return { key, dataUrl: null, error: 'Empty blob' };
-          }
-          
-          try {
-            const dataUrl = await toMp3DataUrl(blob, key);
-            return { key, dataUrl, error: null };
-          } catch (err) {
-            console.error(`[AIPracticeSpeakingTest] Conversion error for ${key}:`, err);
-            return { key, dataUrl: null, error: err instanceof Error ? err.message : 'Conversion failed' };
-          }
-        });
-
-        const conversionResults = await Promise.all(conversionPromises);
-        const conversionTimeMs = Date.now() - conversionStartTime;
-        console.log(`[AIPracticeSpeakingTest] Parallel conversion completed in ${conversionTimeMs}ms`);
-
-        // Build audioData object for evaluate-speaking-parallel
-        const audioData: Record<string, string> = {};
-        const conversionErrors: Array<{ key: string; error: string }> = [];
         
-        for (const result of conversionResults) {
-          if (result.dataUrl) {
-            audioData[result.key] = result.dataUrl;
-          } else if (result.error) {
-            conversionErrors.push({ key: result.key, error: result.error });
-          }
-        }
-
-        if (Object.keys(audioData).length === 0) {
-          throw new Error(`All audio conversions failed: ${conversionErrors.map(e => e.key).join(', ')}`);
-        }
-
-        if (conversionErrors.length > 0) {
-          console.warn(`[AIPracticeSpeakingTest] ${conversionErrors.length} conversions failed, continuing with ${Object.keys(audioData).length} files`);
-        }
-
-        setEvaluationStep(2);
-        setSubmissionProgress({ 
-          step: 'Evaluating', 
-          detail: 'Sending audio for parallel evaluation (Google + R2 upload happening simultaneously)...', 
-          currentItem: 0, 
-          totalItems: 0 
-        });
-
-        console.log(`[AIPracticeSpeakingTest] Calling evaluate-speaking-parallel with ${Object.keys(audioData).length} audio segments`);
-        const evaluationStartTime = Date.now();
-
-        const { data, error } = await supabase.functions.invoke('evaluate-speaking-parallel', {
-          body: {
-            testId,
-            audioData,
-            durations,
-            topic: test?.topic,
-            difficulty: test?.difficulty,
-            fluencyFlag,
-          },
-        });
-
-        const evaluationTimeMs = Date.now() - evaluationStartTime;
-
-        if (exitRequestedRef.current || !isMountedRef.current) return;
-
-        if (error) {
-          console.error('[AIPracticeSpeakingTest] Parallel evaluation error:', error);
-          throw new Error(error.message || 'Evaluation failed');
-        }
-
-        if (data?.success && data?.resultId) {
-          const totalTimeMs = conversionTimeMs + evaluationTimeMs;
-          console.log(`[AIPracticeSpeakingTest] ✅ Parallel evaluation complete!`);
-          console.log(`[AIPracticeSpeakingTest] Timing: conversion=${conversionTimeMs}ms, evaluation=${evaluationTimeMs}ms, total=${totalTimeMs}ms`);
-          
-          setEvaluationStep(3);
+        let parallelSuccess = false;
+        
+        try {
           setSubmissionProgress({ 
-            step: 'Complete!', 
-            detail: `Evaluation finished in ${(totalTimeMs / 1000).toFixed(1)}s`, 
+            step: 'Converting Audio', 
+            detail: `Converting ${totalAudioFiles} audio files in parallel...`, 
+            currentItem: 0, 
+            totalItems: totalAudioFiles 
+          });
+
+          // Convert all audio to MP3 base64 IN PARALLEL
+          const conversionStartTime = Date.now();
+          const conversionPromises = keys.map(async (key) => {
+            const seg = segments[key];
+            const inferredType = seg.chunks?.[0]?.type || 'audio/webm';
+            const blob = new Blob(seg.chunks, { type: inferredType });
+            
+            if (blob.size === 0) {
+              return { key, dataUrl: null, error: 'Empty blob' };
+            }
+            
+            try {
+              const dataUrl = await toMp3DataUrl(blob, key);
+              return { key, dataUrl, error: null };
+            } catch (err) {
+              console.error(`[AIPracticeSpeakingTest] Conversion error for ${key}:`, err);
+              return { key, dataUrl: null, error: err instanceof Error ? err.message : 'Conversion failed' };
+            }
+          });
+
+          const conversionResults = await Promise.all(conversionPromises);
+          const conversionTimeMs = Date.now() - conversionStartTime;
+          console.log(`[AIPracticeSpeakingTest] Parallel conversion completed in ${conversionTimeMs}ms`);
+
+          // Build audioData object for evaluate-speaking-parallel
+          const audioData: Record<string, string> = {};
+          const conversionErrors: Array<{ key: string; error: string }> = [];
+          
+          for (const result of conversionResults) {
+            if (result.dataUrl) {
+              audioData[result.key] = result.dataUrl;
+            } else if (result.error) {
+              conversionErrors.push({ key: result.key, error: result.error });
+            }
+          }
+
+          if (Object.keys(audioData).length === 0) {
+            throw new Error(`All audio conversions failed: ${conversionErrors.map(e => e.key).join(', ')}`);
+          }
+
+          if (conversionErrors.length > 0) {
+            console.warn(`[AIPracticeSpeakingTest] ${conversionErrors.length} conversions failed, continuing with ${Object.keys(audioData).length} files`);
+          }
+
+          setEvaluationStep(2);
+          setSubmissionProgress({ 
+            step: 'Evaluating', 
+            detail: 'Sending audio for parallel evaluation (Google + R2 upload happening simultaneously)...', 
             currentItem: 0, 
             totalItems: 0 
           });
 
-          // Delete persisted audio (processed successfully)
-          if (testId) await deleteAudioSegments(testId);
+          console.log(`[AIPracticeSpeakingTest] Calling evaluate-speaking-parallel with ${Object.keys(audioData).length} audio segments`);
+          const evaluationStartTime = Date.now();
 
-          // Track topic completion
-          if (test?.topic) incrementCompletion(test.topic);
-
-          toast({
-            title: 'Evaluation Complete!',
-            description: `Band ${data.overallBand?.toFixed(1)} in ${(totalTimeMs / 1000).toFixed(1)}s. Check history for results.`,
+          const { data, error } = await supabase.functions.invoke('evaluate-speaking-parallel', {
+            body: {
+              testId,
+              audioData,
+              durations,
+              topic: test?.topic,
+              difficulty: test?.difficulty,
+              fluencyFlag,
+            },
           });
 
-          setPhase('done');
+          const evaluationTimeMs = Date.now() - evaluationStartTime;
 
-          // Navigate to history page - consistent with async mode
-          if (!exitRequestedRef.current && isMountedRef.current) {
-            await exitFullscreen();
-            navigate('/ai-practice/history');
+          if (exitRequestedRef.current || !isMountedRef.current) return;
+
+          if (error) {
+            console.error('[AIPracticeSpeakingTest] Parallel evaluation error:', error);
+            throw new Error(error.message || 'Evaluation failed');
           }
-        } else if (data?.error) {
-          // Check if we should fallback to async mode
-          const errorMsg = data.error?.toLowerCase() || '';
+
+          if (data?.success && data?.resultId) {
+            const totalTimeMs = conversionTimeMs + evaluationTimeMs;
+            console.log(`[AIPracticeSpeakingTest] ✅ Parallel evaluation complete!`);
+            console.log(`[AIPracticeSpeakingTest] Timing: conversion=${conversionTimeMs}ms, evaluation=${evaluationTimeMs}ms, total=${totalTimeMs}ms`);
+            
+            setEvaluationStep(3);
+            setSubmissionProgress({ 
+              step: 'Complete!', 
+              detail: `Evaluation finished in ${(totalTimeMs / 1000).toFixed(1)}s`, 
+              currentItem: 0, 
+              totalItems: 0 
+            });
+
+            // Delete persisted audio (processed successfully)
+            if (testId) await deleteAudioSegments(testId);
+
+            // Track topic completion
+            if (test?.topic) incrementCompletion(test.topic);
+
+            toast({
+              title: 'Evaluation Complete!',
+              description: `Band ${data.overallBand?.toFixed(1)} in ${(totalTimeMs / 1000).toFixed(1)}s. Check history for results.`,
+            });
+
+            setPhase('done');
+            parallelSuccess = true;
+
+            // Navigate to history page - consistent with async mode
+            if (!exitRequestedRef.current && isMountedRef.current) {
+              await exitFullscreen();
+              navigate('/ai-practice/history');
+            }
+            return; // Exit early - accuracy mode complete
+          } else if (data?.error) {
+            // Check if we should fallback to async mode
+            const errorMsg = String(data.error).toLowerCase();
+            const isRetriable = errorMsg.includes('rate limit') || 
+                                errorMsg.includes('429') || 
+                                errorMsg.includes('timeout') ||
+                                errorMsg.includes('quota') ||
+                                errorMsg.includes('overloaded') ||
+                                errorMsg.includes('resource_exhausted');
+            
+            if (isRetriable) {
+              console.warn('[AIPracticeSpeakingTest] Parallel mode failed with retriable error, falling back to async...');
+              
+              setSubmissionProgress({ 
+                step: 'Switching to Background Mode', 
+                detail: 'Rate limit reached. Uploading for background evaluation...', 
+                currentItem: 0, 
+                totalItems: 0 
+              });
+              
+              toast({
+                title: 'Switching to Background Mode',
+                description: 'Rate limit reached. Your test will be evaluated in the background.',
+              });
+              
+              // Fall through to async mode - parallelSuccess stays false
+            } else {
+              throw new Error(data.error);
+            }
+          } else {
+            throw new Error('Unexpected response from parallel evaluation');
+          }
+        } catch (parallelError: any) {
+          // Check if this is a retriable error that should fallback to async
+          const errorMsg = String(parallelError?.message || '').toLowerCase();
           const isRetriable = errorMsg.includes('rate limit') || 
                               errorMsg.includes('429') || 
                               errorMsg.includes('timeout') ||
                               errorMsg.includes('quota') ||
-                              errorMsg.includes('overloaded');
+                              errorMsg.includes('overloaded') ||
+                              errorMsg.includes('resource_exhausted') ||
+                              errorMsg.includes('failed to fetch');
           
-          if (isRetriable) {
-            console.warn('[AIPracticeSpeakingTest] Parallel mode failed with retriable error, falling back to async...');
-            toast({
-              title: 'Switching to Background Mode',
-              description: 'Rate limit reached. Your test will be evaluated in the background.',
-            });
-            // Don't throw - let it continue to async mode below
-          } else {
-            throw new Error(data.error);
+          if (!isRetriable) {
+            // Non-retriable error, throw it to outer catch
+            throw parallelError;
           }
-        } else {
-          throw new Error('Unexpected response from parallel evaluation');
+          
+          console.warn('[AIPracticeSpeakingTest] Parallel mode threw retriable error, falling back to async:', parallelError.message);
+          
+          setSubmissionProgress({ 
+            step: 'Switching to Background Mode', 
+            detail: 'Connection issue. Uploading for background evaluation...', 
+            currentItem: 0, 
+            totalItems: 0 
+          });
+          
+          toast({
+            title: 'Switching to Background Mode',
+            description: 'Connection issue. Your test will be evaluated in the background.',
+          });
+          
+          // Fall through to async mode - parallelSuccess stays false
         }
-        return; // Exit early - accuracy mode complete
+        
+        // If parallel succeeded, we already returned
+        if (parallelSuccess) return;
+        
+        console.log('[AIPracticeSpeakingTest] Falling through to async mode after parallel failure...');
       }
 
       // =====================================================================
