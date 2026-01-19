@@ -578,12 +578,13 @@ async function processTextBasedEvaluation(job: any, supabaseService: any, appEnc
   }
   const totalParts = partsPresent.size || 3;
 
-  // Update progress: Starting evaluation (10%)
+  // Update progress: Starting text-based evaluation (single stage, no fake part progression)
   await supabaseService
     .from('speaking_evaluation_jobs')
     .update({ 
-      progress: 10, 
-      current_part: 1,
+      stage: 'evaluating_text',
+      progress: 25, 
+      current_part: null, // Don't set a fake part - text evaluation is a single AI call
       total_parts: totalParts,
       updated_at: new Date().toISOString() 
     })
@@ -605,13 +606,12 @@ async function processTextBasedEvaluation(job: any, supabaseService: any, appEnc
         try {
           console.log(`[processTextBasedEvaluation] Trying ${modelName} (attempt ${attempt + 1}/${MAX_KEY_RETRIES})`);
           
-          // Update progress: Evaluating Part 1 (20-30%)
+          // Update heartbeat during evaluation (keep stage as evaluating_text)
           await supabaseService
             .from('speaking_evaluation_jobs')
             .update({ 
               heartbeat_at: new Date().toISOString(),
-              progress: 20 + (attempt * 5),
-              current_part: 1,
+              progress: 30 + (attempt * 10), // Gradual progress within text evaluation
               updated_at: new Date().toISOString()
             })
             .eq('id', jobId);
@@ -643,12 +643,11 @@ async function processTextBasedEvaluation(job: any, supabaseService: any, appEnc
           // Log response length for debugging
           console.log(`[processTextBasedEvaluation] Response length: ${text.length} chars`);
 
-          // Update progress: Received response, processing Part 2 (50%)
+          // Update progress: Received response, parsing (70%)
           await supabaseService
             .from('speaking_evaluation_jobs')
             .update({ 
-              progress: 50, 
-              current_part: 2,
+              progress: 70, 
               updated_at: new Date().toISOString() 
             })
             .eq('id', jobId);
@@ -658,12 +657,11 @@ async function processTextBasedEvaluation(job: any, supabaseService: any, appEnc
             evaluationResult = parsed;
             console.log(`[processTextBasedEvaluation] Success with ${modelName} on attempt ${attempt + 1}`);
             
-            // Update progress: Evaluation complete, processing Part 3 (80%)
+            // Update progress: Evaluation complete, finalizing (85%)
             await supabaseService
               .from('speaking_evaluation_jobs')
               .update({ 
-                progress: 80, 
-                current_part: 3,
+                progress: 85, 
                 updated_at: new Date().toISOString() 
               })
               .eq('id', jobId);

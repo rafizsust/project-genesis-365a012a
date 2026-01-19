@@ -1138,19 +1138,143 @@ export default function AIPracticeSpeakingTest() {
         durations[key] = segments[key].duration;
       }
 
+      // Build transcript data from speech analysis for text-based evaluation
+      const transcriptData: Record<string, unknown> = {};
+      for (const [key, analysis] of Object.entries(segmentAnalyses)) {
+        transcriptData[key] = {
+          rawTranscript: analysis.rawTranscript,
+          durationMs: analysis.durationMs,
+          browserMode: analysis.browserMode,
+        };
+      }
 
       // =====================================================================
-      // NOTE
+      // TEXT-BASED MODE OPTIMIZATION: Send transcript immediately, upload audio in parallel
       // =====================================================================
-      // A previous experimental "true parallel" accuracy-mode path lived here.
-      // It is intentionally removed to keep the submission flow consistent:
-      // we always upload to R2 then queue `evaluate-speaking-async`, which powers
-      // the stage-by-stage progress UI (History cards + Results page).
+      // For text-based evaluation with transcripts, we don't need audio for evaluation.
+      // Send the evaluation request immediately with transcripts, and upload audio
+      // in the background for archival purposes only.
+      
+      const hasTranscripts = evaluationMode === 'basic' && Object.keys(transcriptData).length > 0;
+      
+      if (hasTranscripts) {
+        console.log('[AIPracticeSpeakingTest] TEXT-BASED MODE: Sending transcript immediately, uploading audio in background');
+        
+        // Update tracker for History page
+        if (testId) {
+          patchSpeakingSubmissionTracker(testId, {
+            stage: 'queuing' as SpeakingSubmissionStage,
+            detail: 'Sending transcripts for evaluation...',
+          });
+        }
+        
+        // Debug: Log FULL transcript text for each speaking question
+        console.log('[AIPracticeSpeakingTest] === SPEAKING SUBMISSION TRANSCRIPTS ===');
+        for (const [key, value] of Object.entries(transcriptData)) {
+          const v = value as any;
+          console.log(`[AIPracticeSpeakingTest] ${key}:`);
+          console.log(`  Raw: ${v?.rawTranscript || '(empty)'}`);
+        }
+        console.log('[AIPracticeSpeakingTest] === END TRANSCRIPTS ===');
+        
+        // STEP 1: Call ASYNC evaluation IMMEDIATELY with transcripts (no file paths needed)
+        const { data, error } = await supabase.functions.invoke('evaluate-speaking-async', {
+          body: {
+            testId,
+            filePaths: {}, // Empty - no files needed for text eval
+            durations,
+            topic: test?.topic,
+            difficulty: test?.difficulty,
+            fluencyFlag,
+            cancelExisting: true,
+            evaluationMode: 'basic',
+            transcripts: transcriptData,
+          },
+        });
+
+        if (error) {
+          console.error('[AIPracticeSpeakingTest] Async evaluation error:', error);
+          throw new Error(error.message || 'Submission failed');
+        }
+
+        if (data?.jobId || data?.success) {
+          console.log('[AIPracticeSpeakingTest] Evaluation job queued (text-based):', data.jobId || 'preset');
+          
+          // Track topic completion
+          if (test?.topic) incrementCompletion(test.topic);
+          
+          // Show success toast
+          safeToast({
+            title: 'Test Submitted!',
+            description: 'Your speaking test is being evaluated. Check your history for results.',
+          });
+          
+          // Clear tracker - job is now in DB
+          if (testId) clearSpeakingSubmissionTracker(testId);
+          
+          // Clear background submission flag
+          backgroundSubmissionActiveRef.current = false;
+          
+          // Mark for navigation
+          pendingNavigationRef.current = true;
+          
+          // Navigate immediately if ending audio has completed
+          if (endingAudioCompleteRef.current && !exitRequestedRef.current && isMountedRef.current) {
+            setPhase('done');
+            await exitFullscreen();
+            navigate('/ai-practice/history');
+          }
+        } else if (data?.error) {
+          throw new Error(data.error);
+        }
+
+        // STEP 2: Upload audio in background for archival (fire-and-forget)
+        // This continues even after navigation
+        (async () => {
+          console.log('[AIPracticeSpeakingTest] Starting background audio upload for archival...');
+          
+          for (let i = 0; i < keys.length; i++) {
+            const key = keys[i];
+            if (exitRequestedRef.current) return;
+            
+            const seg = segments[key];
+            const inferredType = seg.chunks?.[0]?.type || 'audio/webm';
+            const blob = new Blob(seg.chunks, { type: inferredType });
+            
+            if (blob.size === 0) continue;
+            
+            try {
+              const mp3Blob = await toMp3DataUrl(blob, key).then(async (dataUrl) => {
+                const response = await fetch(dataUrl);
+                return response.blob();
+              });
+              
+              await supabase.functions.invoke('upload-speaking-audio', {
+                body: {
+                  testId,
+                  partNumber: seg.partNumber,
+                  audioData: { [key]: await blobToDataUrl(mp3Blob) },
+                },
+              });
+              
+              console.log(`[AIPracticeSpeakingTest] Background upload complete: ${key}`);
+            } catch (err) {
+              console.warn(`[AIPracticeSpeakingTest] Background upload failed for ${key}:`, err);
+            }
+          }
+          
+          // Delete persisted audio after background upload completes
+          if (testId) await deleteAudioSegments(testId);
+          console.log('[AIPracticeSpeakingTest] Background audio upload complete');
+        })();
+
+        return; // Early return - text-based path is complete
+      }
 
       // =====================================================================
-      // BASIC MODE: Sequential R2 upload then async evaluation (existing flow)
+      // ACCURACY MODE / BASIC MODE WITHOUT TRANSCRIPTS: Sequential R2 upload then async evaluation
       // =====================================================================
-      console.log('[AIPracticeSpeakingTest] BASIC MODE: Sequential R2 upload');
+      console.log('[AIPracticeSpeakingTest] ACCURACY MODE: Sequential R2 upload');
       setSubmissionProgress({ step: 'Converting Audio', detail: `Preparing ${totalAudioFiles} audio files for upload...`, currentItem: 0, totalItems: totalAudioFiles });
       console.log('[AIPracticeSpeakingTest] Step 1: Uploading audio files to R2...');
       
@@ -1290,16 +1414,7 @@ export default function AIPracticeSpeakingTest() {
       console.log(`[AIPracticeSpeakingTest] Step 2: Calling ASYNC evaluation (${Object.keys(filePaths).length} files)...`);
 
       // Note: fluencyFlag already calculated at the top of submitTest
-
-      // Build transcript data from speech analysis for text-based evaluation
-      const transcriptData: Record<string, unknown> = {};
-      for (const [key, analysis] of Object.entries(segmentAnalyses)) {
-        transcriptData[key] = {
-          rawTranscript: analysis.rawTranscript,
-          durationMs: analysis.durationMs,
-          browserMode: analysis.browserMode,
-        };
-      }
+      // Note: transcriptData already built at the top of submitTest
 
       // STEP 2: Call ASYNC evaluation - returns immediately with 202
       // Include transcript data for text-based evaluation (much cheaper than audio)
@@ -1541,7 +1656,7 @@ export default function AIPracticeSpeakingTest() {
   };
 
   // Handle stopping recording early and moving to next question/part
-  const handleStopAndNext = () => {
+  const handleStopAndNext = async () => {
     const currentPhase = phaseRef.current;
     const parts = speakingPartsRef.current;
     const qIdx = questionIndexRef.current;
@@ -1553,8 +1668,21 @@ export default function AIPracticeSpeakingTest() {
     }
     setTimeLeft(0);
 
+    // Helper to await transcript finalization inline
+    const awaitFinalization = async () => {
+      const key = activeAudioKeyRef.current;
+      const pendingPromise = key ? pendingTranscriptFinalizationsRef.current[key] : undefined;
+      if (pendingPromise) {
+        await Promise.race([
+          pendingPromise,
+          new Promise<void>((resolve) => setTimeout(resolve, 1500)),
+        ]);
+      }
+    };
+
     if (currentPhase === 'part1_recording') {
       stopRecording();
+      await awaitFinalization();
       const part1 = parts.part1;
       const nextIdx = qIdx + 1;
       
@@ -1567,6 +1695,7 @@ export default function AIPracticeSpeakingTest() {
       }
     } else if (currentPhase === 'part2_recording') {
       stopRecording();
+      await awaitFinalization();
       const duration = (Date.now() - part2SpeakStartRef.current) / 1000;
       setRecordings((prev) => ({
         ...prev,
@@ -1575,6 +1704,7 @@ export default function AIPracticeSpeakingTest() {
       transitionToPart3();
     } else if (currentPhase === 'part3_recording') {
       stopRecording();
+      await awaitFinalization();
       const part3 = parts.part3;
       const nextIdx = qIdx + 1;
       
@@ -1676,27 +1806,36 @@ export default function AIPracticeSpeakingTest() {
         return;
       }
       
-      // BASIC MODE or accuracy mode when submission hasn't started yet
-      // Submit and navigate immediately after ending audio completes
+      // BOTH MODES: Navigate immediately and process in background
+      // This provides instant feedback to users while submission continues
       console.log('[AIPracticeSpeakingTest] Ending audio complete - submitting test');
-      // For accuracy mode without pending navigation, trigger immediate navigation after submit
-      if (evaluationMode === 'accuracy') {
-        // For accuracy mode, start submission in background and navigate immediately
-        // to avoid the delay before redirect
-        submitTest();
-        setPhase('done');
-        exitFullscreen().then(() => {
-          navigate('/ai-practice/history');
-        });
-      } else {
-        // Basic mode - wait for submission to complete before showing UI
-        submitTest();
-      }
+      
+      // Start submission in background and navigate immediately
+      submitTest();
+      setPhase('done');
+      exitFullscreen().then(() => {
+        navigate('/ai-practice/history');
+      });
+    }
+  };
+
+  // Helper to await transcript finalization before transitioning to next question
+  // This prevents the last 2-4 words from being cut off in text-based evaluation
+  const awaitCurrentTranscriptFinalization = async (): Promise<void> => {
+    const key = activeAudioKeyRef.current;
+    const pendingPromise = key ? pendingTranscriptFinalizationsRef.current[key] : undefined;
+    if (pendingPromise) {
+      console.log(`[SpeakingTest] Awaiting transcript finalization for ${key}...`);
+      await Promise.race([
+        pendingPromise,
+        new Promise<void>((resolve) => setTimeout(resolve, 1500)),
+      ]);
+      console.log(`[SpeakingTest] Transcript finalization complete for ${key}`);
     }
   };
 
   // Handle timer completion
-  const handleTimerComplete = () => {
+  const handleTimerComplete = async () => {
     if (exitRequestedRef.current || !isMountedRef.current || showExitDialog) return;
 
     const currentPhase = phaseRef.current;
@@ -1705,6 +1844,9 @@ export default function AIPracticeSpeakingTest() {
 
     if (currentPhase === 'part1_recording') {
       stopRecording();
+      // Wait for transcript finalization before moving to next question
+      await awaitCurrentTranscriptFinalization();
+      
       const part1 = parts.part1;
       const nextIdx = qIdx + 1;
 
@@ -1720,6 +1862,9 @@ export default function AIPracticeSpeakingTest() {
       speakText("Your one minute preparation time is over. Please start speaking now. You have two minutes.", 'part2_prep_end');
     } else if (currentPhase === 'part2_recording') {
       stopRecording();
+      // Wait for transcript finalization before transitioning
+      await awaitCurrentTranscriptFinalization();
+      
       const duration = (Date.now() - part2SpeakStartRef.current) / 1000;
       setRecordings((prev) => ({
         ...prev,
@@ -1728,6 +1873,9 @@ export default function AIPracticeSpeakingTest() {
       transitionToPart3();
     } else if (currentPhase === 'part3_recording') {
       stopRecording();
+      // Wait for transcript finalization before moving to next question
+      await awaitCurrentTranscriptFinalization();
+      
       const part3 = parts.part3;
       const nextIdx = qIdx + 1;
 

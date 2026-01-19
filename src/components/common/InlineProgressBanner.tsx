@@ -92,6 +92,8 @@ function getStageLabel(stage: string | null | undefined, currentPart?: number): 
     case 'transcribing':
       return 'Transcribing audio...';
     case 'evaluating_text':
+      // Text-based evaluation uses a single AI call - don't show part-by-part progress
+      return 'Evaluating your responses...';
     case 'evaluating':
     case 'evaluating_part_1':
       return `Evaluating Part ${currentPart && currentPart > 0 ? currentPart : 1}...`;
@@ -160,7 +162,12 @@ function getProgressFromStage(
   const evalRange = evalEndPct - evalStartPct;
   const perPartPct = evalRange / parts;
   
-  if (stage === 'evaluating' || stage === 'evaluating_text') {
+  if (stage === 'evaluating_text') {
+    // Text-based evaluation uses a single AI call - show steady progress
+    return 45; // Fixed middle progress for text evaluation
+  }
+  
+  if (stage === 'evaluating') {
     // Use currentPart if available, otherwise assume part 1
     const part = currentPart || 1;
     // Return progress at the START of evaluating this part
