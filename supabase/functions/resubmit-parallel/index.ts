@@ -278,6 +278,26 @@ serve(async (req) => {
     }
     timing.fetchJob = Date.now() - fetchJobStart;
 
+    // Fallback: if no job found, try to get file_paths from ai_practice_results.answers
+    if (!filePaths || Object.keys(filePaths).length === 0) {
+      console.log('[resubmit-parallel] No job found, checking ai_practice_results for file_paths');
+      const { data: resultRow } = await supabaseService
+        .from('ai_practice_results')
+        .select('answers')
+        .eq('test_id', testId)
+        .eq('user_id', user.id)
+        .eq('module', 'speaking')
+        .order('completed_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      const answers = resultRow?.answers as any;
+      if (answers?.file_paths && typeof answers.file_paths === 'object') {
+        filePaths = answers.file_paths as Record<string, string>;
+        console.log(`[resubmit-parallel] Found ${Object.keys(filePaths).length} file_paths from ai_practice_results`);
+      }
+    }
+
     if (!filePaths || Object.keys(filePaths).length === 0) {
       return new Response(JSON.stringify({ error: 'No stored audio found for this test', code: 'NO_AUDIO' }), {
         status: 404,
