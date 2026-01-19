@@ -726,7 +726,33 @@ async function processTextBasedEvaluation(job: any, supabaseService: any, appEnc
 
   if (!evaluationResult) throw new Error('Text evaluation failed: all models/keys exhausted after retries');
 
-  const overallBand = evaluationResult.overall_band || calculateBand(evaluationResult);
+  // TEXT-BASED EVALUATION PRONUNCIATION PENALTY
+  // Since we can't actually hear the pronunciation in text-based mode,
+  // apply a defensive -0.5 penalty to pronunciation to avoid over-estimating.
+  // This ensures users are not given artificially high pronunciation scores
+  // when the AI is evaluating text transcripts, not actual audio.
+  if (evaluationResult.criteria?.pronunciation?.band !== undefined) {
+    const originalBand = evaluationResult.criteria.pronunciation.band;
+    const penalizedBand = Math.max(1, originalBand - 0.5); // Don't go below 1
+    evaluationResult.criteria.pronunciation.band = penalizedBand;
+    evaluationResult.criteria.pronunciation.disclaimer = 
+      `Text-based evaluation: Pronunciation estimated from speech recognition patterns. ` +
+      `A -0.5 band adjustment has been applied as actual pronunciation cannot be assessed via text. ` +
+      `For accurate pronunciation scoring, use Accuracy Mode which analyzes your actual audio.`;
+    console.log(`[processTextBasedEvaluation] Applied pronunciation penalty: ${originalBand} -> ${penalizedBand}`);
+  }
+
+  // Recalculate overall band after pronunciation penalty
+  const overallBand = evaluationResult.overall_band 
+    ? Math.round((
+        (evaluationResult.criteria?.fluency_coherence?.band || 5.5) +
+        (evaluationResult.criteria?.lexical_resource?.band || 5.5) +
+        (evaluationResult.criteria?.grammatical_range?.band || 5.5) +
+        (evaluationResult.criteria?.pronunciation?.band || 5.5)
+      ) / 4 * 2) / 2
+    : calculateBand(evaluationResult);
+  
+  evaluationResult.overall_band = overallBand;
 
   // Build public audio URLs if available
   const publicBase = (Deno.env.get('R2_PUBLIC_URL') || '').replace(/\/$/, '');
@@ -840,13 +866,10 @@ function buildTextPrompt(
       return a.questionNumber - b.questionNumber;
     });
 
-  const segmentSummaries = orderedSegments.map((seg, idx) => `
-### SEGMENT_${idx}: ${seg.key.toUpperCase()}
-Part ${seg.partNum} | Question ${seg.questionNumber}: "${seg.questionText}"
-Transcript: "${seg.transcript}"
-Speaking Rate: ${seg.wpm > 0 ? `${seg.wpm} words per minute` : 'Normal pace'}
-Fillers: ${seg.fillers} | Pauses: ${seg.pauses}
-Clarity: ${seg.clarity}% | Pitch Variation: ${seg.pitch.toFixed(0)}%`).join('\n');
+  // Compact segment format to reduce token usage
+  const segmentSummaries = orderedSegments.map((seg, idx) => 
+    `[${seg.key}] P${seg.partNum} Q${seg.questionNumber}: "${seg.questionText}"\n> "${seg.transcript}"${seg.wpm > 0 ? ` [${seg.wpm}wpm]` : ''}`
+  ).join('\n\n');
 
   const numSegments = orderedSegments.length;
 

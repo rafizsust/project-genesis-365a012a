@@ -1258,6 +1258,7 @@ export default function AIPracticeSpeakingTest() {
                   testId,
                   partNumber: seg.partNumber,
                   audioData: { [key]: await blobToDataUrl(mp3Blob) },
+                  updateResult: true, // Update ai_practice_results with audio URLs after upload
                 },
               });
               

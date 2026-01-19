@@ -11,6 +11,7 @@ interface UploadRequest {
   testId: string;
   partNumber: 1 | 2 | 3;
   audioData: Record<string, string>; // key -> dataURL (e.g., "part1-q<id>" -> "data:audio/mp3;base64,...")
+  updateResult?: boolean; // If true, also update the ai_practice_results record with audio URLs
 }
 
 serve(async (req) => {
@@ -42,7 +43,7 @@ serve(async (req) => {
     }
 
     const body: UploadRequest = await req.json();
-    const { testId, partNumber, audioData } = body;
+    const { testId, partNumber, audioData, updateResult } = body;
 
     if (!testId || !partNumber || !audioData) {
       return new Response(JSON.stringify({ error: 'Missing required fields', code: 'BAD_REQUEST' }), {
@@ -55,6 +56,7 @@ serve(async (req) => {
     console.log(`[upload-speaking-audio] Uploading ${audioKeys.length} audio segments for Part ${partNumber}`);
 
     const uploadedUrls: Record<string, string> = {};
+    const filePaths: Record<string, string> = {};
 
     for (const key of audioKeys) {
       try {
@@ -73,6 +75,7 @@ serve(async (req) => {
         const result = await uploadToR2(r2Key, audioBytes, mimeType);
         if (result.success && result.url) {
           uploadedUrls[key] = result.url;
+          filePaths[key] = r2Key;
           console.log(`[upload-speaking-audio] Uploaded: ${key}`);
         } else {
           console.warn(`[upload-speaking-audio] Upload failed for ${key}:`, result.error);
@@ -84,9 +87,61 @@ serve(async (req) => {
 
     console.log(`[upload-speaking-audio] Successfully uploaded ${Object.keys(uploadedUrls).length} files`);
 
+    // If updateResult is true, also update the ai_practice_results record with audio URLs
+    // This is used for text-based evaluation where audio is uploaded in background
+    if (updateResult && Object.keys(uploadedUrls).length > 0) {
+      const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+      if (supabaseServiceKey) {
+        const supabaseService = createClient(supabaseUrl, supabaseServiceKey);
+        
+        // Find the result for this test
+        const { data: existingResult, error: findError } = await supabaseService
+          .from('ai_practice_results')
+          .select('id, answers')
+          .eq('test_id', testId)
+          .eq('user_id', user.id)
+          .eq('module', 'speaking')
+          .order('completed_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        
+        if (findError) {
+          console.warn(`[upload-speaking-audio] Error finding result:`, findError.message);
+        } else if (existingResult) {
+          // Merge new audio URLs with existing ones
+          const existingAnswers = (existingResult.answers || {}) as Record<string, any>;
+          const existingAudioUrls = existingAnswers.audio_urls || {};
+          const existingFilePaths = existingAnswers.file_paths || {};
+          
+          const mergedAudioUrls = { ...existingAudioUrls, ...uploadedUrls };
+          const mergedFilePaths = { ...existingFilePaths, ...filePaths };
+          
+          const { error: updateError } = await supabaseService
+            .from('ai_practice_results')
+            .update({
+              answers: {
+                ...existingAnswers,
+                audio_urls: mergedAudioUrls,
+                file_paths: mergedFilePaths,
+              }
+            })
+            .eq('id', existingResult.id);
+          
+          if (updateError) {
+            console.warn(`[upload-speaking-audio] Error updating result:`, updateError.message);
+          } else {
+            console.log(`[upload-speaking-audio] Updated ai_practice_results ${existingResult.id} with ${Object.keys(uploadedUrls).length} audio URLs`);
+          }
+        } else {
+          console.log(`[upload-speaking-audio] No result found to update for test ${testId}`);
+        }
+      }
+    }
+
     return new Response(JSON.stringify({
       success: true,
       uploadedUrls,
+      filePaths,
       partNumber,
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
