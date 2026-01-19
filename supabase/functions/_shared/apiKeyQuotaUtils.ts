@@ -288,16 +288,12 @@ export function isQuotaExhaustedError(error: any): boolean {
 }
 
 /**
- * STRICT check for PERMANENT daily quota exhaustion
- * Use this ONLY when deciding to mark a model as exhausted for the day.
- * This should NOT return true for:
- * - 429 rate limits (RPM/TPM)
- * - Temporary resource exhaustion
- * - Server errors
- * 
- * This SHOULD return true for:
- * - Daily quota limit reached (billing/plan related)
- * - Account-level restrictions
+ * STRICT check for PERMANENT daily quota exhaustion.
+ *
+ * IMPORTANT:
+ * - Do NOT treat generic "RESOURCE_EXHAUSTED" / "quota" / "resource exhausted" messages as daily exhaustion.
+ *   Gemini often uses those strings for *per-minute* / burst limits as well.
+ * - Only return true when the message clearly indicates a day-level limit or billing/plan restriction.
  */
 export function isDailyQuotaExhaustedError(error: any): boolean {
   if (!error) return false;
@@ -305,27 +301,28 @@ export function isDailyQuotaExhaustedError(error: any): boolean {
   const errorMessage = typeof error === 'string'
     ? error
     : (error.message || error.error?.message || '');
-  
+
   const msg = String(errorMessage).toLowerCase();
 
-  // ONLY mark as daily exhausted for clear billing/quota signals
-  // These indicate the key has truly hit its daily limit
+  // Strong billing/plan signals
   if (msg.includes('check your plan')) return true;
   if (msg.includes('billing')) return true;
   if (msg.includes('limit: 0')) return true;
-  if (msg.includes('per day') && !msg.includes('retry')) return true;
-  if (msg.includes('daily quota') || msg.includes('daily limit')) return true;
-  if (msg.includes('quota exceeded') && (msg.includes('per day') || msg.includes('daily'))) return true;
-  
-  // Check for API response indicating permanent quota exhaustion
-  // Gemini returns specific error codes for daily quota vs rate limits
-  if (msg.includes('exhausted') && msg.includes('quota')) {
-    // Make sure it's not just a per-minute rate limit message
-    if (!msg.includes('per minute') && !msg.includes('rpm') && !msg.includes('tpm')) {
-      return true;
-    }
+
+  // Day-level limit signals (must be explicit)
+  // Note: we intentionally require "daily"/"per day"-style markers to avoid false positives.
+  const mentionsDayLimit =
+    msg.includes('daily') ||
+    (msg.includes('per day') && !msg.includes('retry')) ||
+    msg.includes('day limit') ||
+    msg.includes('day-level') ||
+    msg.includes('per 24 hours') ||
+    msg.includes('24 hours');
+
+  if (mentionsDayLimit && (msg.includes('quota') || msg.includes('quota exceeded') || msg.includes('exhausted'))) {
+    return true;
   }
-  
+
   return false;
 }
 
