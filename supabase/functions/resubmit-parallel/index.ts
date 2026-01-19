@@ -144,9 +144,9 @@ Score harshly for poor responses:
 🟡 Band 4-4.5: 10-20 words, basic grammar only
 
 MODEL ANSWER WORD COUNTS:
-- Part 1: 40-50 words
-- Part 2: 170-190 words
-- Part 3: 70-90 words
+- Part 1: 30-40 words
+- Part 2: 120-140 words
+- Part 3: 55-65 words
 
 JSON OUTPUT SCHEMA:
 {

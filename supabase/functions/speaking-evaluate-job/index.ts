@@ -848,6 +848,16 @@ serve(async (req) => {
       }
     }
 
+    // Calculate evaluation timing from job creation
+    const jobStartTime = new Date(job.created_at).getTime();
+    const totalTimeMs = Date.now() - jobStartTime;
+    const evaluationTiming = {
+      totalTimeMs,
+      timing: {
+        total: totalTimeMs,
+      },
+    };
+
     // Save result
     const { data: resultRow, error: saveError } = await supabaseService
       .from('ai_practice_results')
@@ -866,6 +876,7 @@ serve(async (req) => {
           transcripts_by_question: finalResult?.transcripts_by_question || {},
           file_paths: filePathsMap,
         },
+        evaluation_timing: evaluationTiming,
         completed_at: new Date().toISOString(),
       })
       .select()

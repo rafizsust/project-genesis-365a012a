@@ -125,9 +125,9 @@ IMPORTANT OUTPUT LIMITS:
 - improvement_priorities: REQUIRED 2-3 specific priorities based on lowest scoring criteria
 
 MODEL ANSWER WORD COUNTS (STRICT - MUST FOLLOW):
-- Part 1: 40-50 words EXACTLY (natural, conversational - do NOT exceed)
-- Part 2: 170-190 words EXACTLY (covers all cue card points with examples - this is the long turn)
-- Part 3: 70-90 words EXACTLY (analytical with one supporting example)
+- Part 1: 30-40 words EXACTLY (natural, conversational - do NOT exceed)
+- Part 2: 120-140 words EXACTLY (covers all cue card points with examples - this is the long turn)
+- Part 3: 55-65 words EXACTLY (analytical with one supporting example)
 
 ══════════════════════════════════════════════════════════════
 WEAKNESS FORMAT (IMPORTANT)

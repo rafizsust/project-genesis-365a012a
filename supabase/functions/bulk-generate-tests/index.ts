@@ -1850,9 +1850,9 @@ MANDATORY - SAMPLE ANSWERS REQUIREMENTS (STRICT WORD COUNTS):
 2. Each sample_answer MUST be a COMPLETE, GRAMMATICALLY CORRECT sentence or paragraph
 3. NEVER end a sentence mid-phrase (e.g., "I frequent." is WRONG - it should be "I frequent regularly.")
 4. NEVER truncate or cut off answers - complete every thought
-5. Each Part 1 sample_answer: 60-85 words per question (natural, conversational with personal examples and details)
-6. Part 2 sample_answer: 260-340 words (comprehensive long turn covering ALL cue card points with elaboration, examples, and a proper conclusion)
-7. Each Part 3 sample_answer: 130-170 words per question (in-depth discussion with clear reasoning, examples, and balanced perspectives)
+5. Each Part 1 sample_answer: 30-40 words per question (natural, conversational with personal examples)
+6. Part 2 sample_answer: 120-140 words (comprehensive long turn covering ALL cue card points with elaboration, examples, and a proper conclusion)
+7. Each Part 3 sample_answer: 55-65 words per question (in-depth discussion with clear reasoning and examples)
 8. Verify each sample_answer ends with proper punctuation and a complete thought
 9. Re-read each sample_answer before finalizing to ensure it makes grammatical sense
 10. These word counts are MINIMUM STANDARDS - sample answers must demonstrate ideal IELTS response structure`;

@@ -468,6 +468,14 @@ async function processJob(job: any, supabaseService: any, appEncryptionKey: stri
     }
   }
 
+  // Calculate evaluation timing from job creation
+  const jobStartTime = new Date(job.created_at).getTime();
+  const totalTimeMs = Date.now() - jobStartTime;
+  const evaluationTiming = {
+    totalTimeMs,
+    timing: { total: totalTimeMs },
+  };
+
   // Save result
   const { data: resultRow, error: saveError } = await supabaseService
     .from('ai_practice_results')
@@ -486,6 +494,7 @@ async function processJob(job: any, supabaseService: any, appEncryptionKey: stri
         transcripts_by_question: evaluationResult?.transcripts_by_question || {},
         file_paths,
       },
+      evaluation_timing: evaluationTiming,
       completed_at: new Date().toISOString(),
     })
     .select()
@@ -730,6 +739,14 @@ async function processTextBasedEvaluation(job: any, supabaseService: any, appEnc
     }
   }
 
+  // Calculate evaluation timing from job creation
+  const jobStartTimeText = new Date(job.created_at).getTime();
+  const totalTimeMsText = Date.now() - jobStartTimeText;
+  const evaluationTimingText = {
+    totalTimeMs: totalTimeMsText,
+    timing: { total: totalTimeMsText },
+  };
+
   // Save result with transcripts included
   const { data: resultRow, error: saveError } = await supabaseService
     .from('ai_practice_results')
@@ -749,6 +766,7 @@ async function processTextBasedEvaluation(job: any, supabaseService: any, appEnc
         transcripts_by_question: evaluationResult?.transcripts_by_question || {},
         file_paths,
       },
+      evaluation_timing: evaluationTimingText,
       completed_at: new Date().toISOString(),
     })
     .select()

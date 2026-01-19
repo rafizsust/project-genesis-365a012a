@@ -73,13 +73,13 @@ function LiveElapsedTime({ startTime }: { startTime: string }) {
   );
 }
 
-// Get stage label for display - WITHOUT "of X" suffix per user request
+// Get stage label for display - user-friendly step names
 function getStageLabel(stage: string | null | undefined, currentPart?: number): string {
   if (!stage) return 'Processing...';
 
   switch (stage) {
     case 'preparing':
-      return 'Preparing...';
+      return 'Preparing audio...';
     case 'converting':
       return 'Converting audio...';
     case 'uploading':
@@ -88,23 +88,23 @@ function getStageLabel(stage: string | null | undefined, currentPart?: number): 
     case 'pending_text_eval':
     case 'pending':
     case 'queuing':
-      return 'Queued';
+      return 'Evaluation queued...';
     case 'transcribing':
-      return 'Transcribing';
+      return 'Transcribing audio...';
     case 'evaluating_text':
     case 'evaluating':
     case 'evaluating_part_1':
-      return `Evaluating Part ${currentPart && currentPart > 0 ? currentPart : 1}`;
+      return `Evaluating Part ${currentPart && currentPart > 0 ? currentPart : 1}...`;
     case 'evaluating_part_2':
-      return 'Evaluating Part 2';
+      return 'Evaluating Part 2...';
     case 'evaluating_part_3':
-      return 'Evaluating Part 3';
+      return 'Evaluating Part 3...';
     case 'generating_feedback':
     case 'generating':
-      return 'Generating feedback';
+      return 'Generating feedback...';
     case 'finalizing':
     case 'saving':
-      return 'Saving results';
+      return 'Finalizing...';
     case 'completed':
       return 'Complete';
     case 'cancelled':
@@ -116,32 +116,75 @@ function getStageLabel(stage: string | null | undefined, currentPart?: number): 
   }
 }
 
-// Calculate approximate progress from stage
-function getProgressFromStage(stage: string | null | undefined, progress?: number): number {
+/**
+ * Calculate progress percentage based on realistic time distribution:
+ * - Converting: ~3s (2%)
+ * - Uploading: ~5s (3%)
+ * - Queuing: instant (5%)
+ * - Preparing audio: ~2s (2%)
+ * - Evaluating Part 1: ~25s (25%)
+ * - Evaluating Part 2: ~30s (30%)
+ * - Evaluating Part 3: ~25s (25%)
+ * - Finalizing: ~3s (3%)
+ * 
+ * Total typical time: ~95s for 3-part test
+ * Evaluation takes ~85% of total time
+ */
+function getProgressFromStage(
+  stage: string | null | undefined, 
+  progress?: number, 
+  currentPart?: number,
+  totalParts?: number
+): number {
   if (typeof progress === 'number' && progress > 0) return progress;
   
-  if (!stage) return 5;
+  if (!stage) return 2;
   
+  // Pre-evaluation stages (0-12%)
   switch (stage) {
-    case 'preparing': return 5;
-    case 'converting': return 10;
-    case 'uploading': return 20;
+    case 'preparing': return 2;
+    case 'converting': return 5;
+    case 'uploading': return 8;
     case 'pending_upload':
     case 'pending_text_eval':
     case 'pending':
-    case 'queuing': return 25;
-    case 'transcribing': return 35;
-    case 'evaluating':
-    case 'evaluating_text':
-    case 'evaluating_part_1': return 45;
-    case 'evaluating_part_2': return 60;
-    case 'evaluating_part_3': return 75;
+    case 'queuing': return 10;
+    case 'transcribing': return 12;
+  }
+  
+  // Evaluation stages take the bulk of time (12-92%)
+  // Distribute based on number of parts
+  const parts = totalParts || 3;
+  const evalStartPct = 12;
+  const evalEndPct = 92;
+  const evalRange = evalEndPct - evalStartPct;
+  const perPartPct = evalRange / parts;
+  
+  if (stage === 'evaluating' || stage === 'evaluating_text') {
+    // Use currentPart if available, otherwise assume part 1
+    const part = currentPart || 1;
+    // Return progress at the START of evaluating this part
+    return Math.round(evalStartPct + (part - 1) * perPartPct);
+  }
+  
+  if (stage === 'evaluating_part_1') {
+    return Math.round(evalStartPct + perPartPct * 0.5); // Midpoint of part 1
+  }
+  if (stage === 'evaluating_part_2') {
+    return Math.round(evalStartPct + perPartPct + perPartPct * 0.5); // Midpoint of part 2
+  }
+  if (stage === 'evaluating_part_3') {
+    return Math.round(evalStartPct + 2 * perPartPct + perPartPct * 0.5); // Midpoint of part 3
+  }
+  
+  // Post-evaluation stages (92-100%)
+  switch (stage) {
     case 'generating_feedback':
-    case 'generating': return 85;
+    case 'generating': return 94;
     case 'finalizing':
-    case 'saving': return 95;
+    case 'saving': return 97;
     case 'completed': return 100;
-    default: return 30;
+    default: return 15;
   }
 }
 
@@ -149,7 +192,7 @@ export function InlineProgressBanner({
   stage,
   currentPart,
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  totalParts: _totalParts,
+  totalParts,
   progress,
   startTime,
   mode,
@@ -157,7 +200,7 @@ export function InlineProgressBanner({
   isCancelling,
   className,
 }: InlineProgressBannerProps) {
-  const displayProgress = getProgressFromStage(stage, progress);
+  const displayProgress = getProgressFromStage(stage, progress, currentPart, totalParts);
   const stageLabel = getStageLabel(stage, currentPart);
   
   return (
