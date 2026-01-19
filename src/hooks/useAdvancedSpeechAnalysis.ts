@@ -12,7 +12,7 @@
  * 3. BROWSER-ADAPTIVE: Chrome uses accent selection, Edge uses natural mode
  */
 
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import {
   detectBrowser,
   getStoredAccent,
@@ -397,11 +397,35 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
     // Normal end (not manual stop): attempt restart
     if (!isAnalyzingRef.current) return;
 
+    // CRITICAL: Check for too many consecutive failures BEFORE attempting restart
+    // This prevents infinite restart loops when there's a persistent error
+    if (consecutiveFailuresRef.current >= MAX_CONSECUTIVE_FAILURES) {
+      console.error('[SpeechAnalysis] Too many consecutive failures, stopping restart loop');
+      setIsAnalyzing(false);
+      isAnalyzingRef.current = false;
+      isRestartingRef.current = false;
+      recognitionRef.current = null;
+      return;
+    }
+
     const delay = browser.isEdge ? EDGE_LATE_RESULT_DELAY_MS : RESTART_DELAY_MS;
+
+    // Track restart attempts to detect infinite loops
+    consecutiveFailuresRef.current++;
 
     setTimeout(() => {
       if (!isAnalyzingRef.current || isManualStopRef.current) {
         isRestartingRef.current = false;
+        return;
+      }
+
+      // Double-check failure count after delay
+      if (consecutiveFailuresRef.current >= MAX_CONSECUTIVE_FAILURES) {
+        console.error('[SpeechAnalysis] Failure threshold reached during restart delay, aborting');
+        setIsAnalyzing(false);
+        isAnalyzingRef.current = false;
+        isRestartingRef.current = false;
+        recognitionRef.current = null;
         return;
       }
 
@@ -413,9 +437,11 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
       try {
         recognitionRef.current?.start();
         console.log('[SpeechAnalysis] Restarted (same instance)');
+        // Reset failure counter on successful start
+        // Note: This will be truly reset when we get a result in handleResult
       } catch (err) {
         console.warn('[SpeechAnalysis] Restart failed:', err);
-        consecutiveFailuresRef.current++;
+        // Don't increment here - we already incremented before the timeout
       }
     }, delay);
   }, []); // No dependencies - uses refs for latest values
@@ -668,6 +694,48 @@ export function useAdvancedSpeechAnalysis(options: UseAdvancedSpeechAnalysisOpti
       recognitionRef.current = null;
     }
   }, [stopWatchdog]);
+
+  // CRITICAL: Cleanup on unmount to prevent orphaned recording state
+  // This fixes the browser tab showing "recording" after navigation
+  useEffect(() => {
+    return () => {
+      console.log('[SpeechAnalysis] Cleanup on unmount');
+      
+      // Stop any ongoing recognition
+      isManualStopRef.current = true;
+      isRestartingRef.current = false;
+      isAnalyzingRef.current = false;
+      isStoppingRef.current = false;
+      
+      // Clear watchdog
+      if (watchdogTimerRef.current) {
+        clearInterval(watchdogTimerRef.current);
+        watchdogTimerRef.current = null;
+      }
+      
+      // Clear stop timeout
+      if (stopTimeoutRef.current) {
+        window.clearTimeout(stopTimeoutRef.current);
+        stopTimeoutRef.current = null;
+      }
+      
+      // Release wake lock
+      if (wakeLockRef.current) {
+        wakeLockRef.current.release().catch(() => {});
+        wakeLockRef.current = null;
+      }
+      
+      // Abort recognition instance
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.abort();
+        } catch {
+          // ignore
+        }
+        recognitionRef.current = null;
+      }
+    };
+  }, []);
 
   return {
     isAnalyzing,

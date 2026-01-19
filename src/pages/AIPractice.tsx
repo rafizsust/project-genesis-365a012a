@@ -360,7 +360,10 @@ export default function AIPractice() {
               .replace(/\s*&\s*/g, " and ")
               .replace(/\s+/g, " ");
 
-          const effectiveTopicForPreset = (topicPreference.trim() || currentSmartCycle.nextTopic || "").trim();
+          // CRITICAL: Treat whitespace-only topic preference as empty (no manual selection)
+          // This prevents matching presets when user enters just spaces
+          const cleanedTopicPreference = topicPreference.trim();
+          const effectiveTopicForPreset = (cleanedTopicPreference || currentSmartCycle.nextTopic || "").trim();
 
           // Apply STRICT filters (no fallback to unrelated presets)
           // For Writing Task 1: filter by specific visual type (BAR_CHART, LINE_GRAPH, etc.) if user selected one
@@ -401,10 +404,18 @@ export default function AIPractice() {
               const skipTopicFilter = activeModule === 'writing' ||
                                        (activeModule === 'speaking' && currentQuestionType === 'FULL_TEST');
               
+              // CRITICAL: For modules that require topic matching (reading, listening, speaking parts),
+              // we MUST have a topic to match. If no topic is available, don't use presets.
+              const requiresTopicMatch = !skipTopicFilter;
+              
               if (effectiveTopicForPreset && !skipTopicFilter) {
                 const wanted = normalizeTopic(effectiveTopicForPreset);
                 matchingTests = matchingTests.filter((t) => normalizeTopic(t.topic) === wanted);
                 console.log('[cache] after topic filter:', matchingTests.length, 'expected:', effectiveTopicForPreset);
+              } else if (requiresTopicMatch && !effectiveTopicForPreset) {
+                // No topic available but topic matching is required - skip preset cache
+                console.log('[cache] MISS: topic matching required but no topic available; proceeding with edge function');
+                matchingTests = []; // Clear to force edge function
               }
 
               if (effectiveTopicForPreset && !skipTopicFilter && matchingTests.length === 0) {
