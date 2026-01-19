@@ -87,18 +87,41 @@ export async function checkoutKeyForPart(
   
   // PRIORITY 1: Try user's own key first (no locking needed)
   // Skip if explicitly told to (e.g., user key is exhausted)
+  let userKeyChecked = false;
   if (appEncryptionKey && !skipUserKey) {
     const userKeyResult = await tryGetUserKey(supabaseService, userId, appEncryptionKey, modelName);
     if (userKeyResult.key) {
       console.log(`[keyPoolManager] Using user's own API key`);
       return { keyId: 'user', keyValue: userKeyResult.key, isUserKey: true };
     }
+    userKeyChecked = true;
+    // Only log "exhausted" if user actually HAS a key that is exhausted
+    // If userKeyResult.exhausted is true, user has a key but it's exhausted for this model
+    // If userKeyResult.noKey is true, user has no key configured at all
     if (userKeyResult.exhausted) {
       console.log(`[keyPoolManager] User's key is exhausted for ${modelName}, falling back to admin pool`);
+    } else if (userKeyResult.noKey) {
+      console.log(`[keyPoolManager] User has no API key configured, using admin pool`);
     }
   }
   
   // PRIORITY 2: Checkout from admin key pool with atomic locking
+  // First, check if user has credits (if they don't have their own key)
+  if (userKeyChecked) {
+    const { data: creditStatus } = await supabaseService.rpc('get_credit_status', {
+      p_user_id: userId,
+    });
+    
+    if (creditStatus && !creditStatus.is_admin) {
+      const creditsRemaining = creditStatus.credits_remaining ?? 0;
+      if (creditsRemaining <= 0) {
+        console.warn(`[keyPoolManager] User has no credits remaining (${creditStatus.credits_used}/100 used) and no personal API key`);
+        // Still allow checkout from admin pool but log the warning
+        // The actual credit check/reservation happens elsewhere
+      }
+    }
+  }
+  
   const { data: keyRows, error } = await supabaseService.rpc('checkout_key_for_part', {
     p_job_id: jobId,
     p_part_number: partNumber,
@@ -112,7 +135,7 @@ export async function checkoutKeyForPart(
   }
   
   if (!keyRows || keyRows.length === 0) {
-    console.warn(`[keyPoolManager] No available API keys for part ${partNumber}`);
+    console.warn(`[keyPoolManager] No available API keys in admin pool for part ${partNumber}`);
     return null;
   }
   
@@ -414,6 +437,7 @@ async function isUserKeyExhausted(
 interface UserKeyResult {
   key: string | null;
   exhausted: boolean;
+  noKey: boolean;  // true if user has no API key configured at all
 }
 
 /**
@@ -427,14 +451,7 @@ async function tryGetUserKey(
   modelName?: string
 ): Promise<UserKeyResult> {
   try {
-    // First check if the key is exhausted for this model today
-    if (modelName) {
-      const exhausted = await isUserKeyExhausted(supabaseService, userId, modelName);
-      if (exhausted) {
-        return { key: null, exhausted: true };
-      }
-    }
-    
+    // First fetch the user's API key secret
     const { data: userSecret } = await supabaseService
       .from('user_secrets')
       .select('encrypted_value')
@@ -442,7 +459,18 @@ async function tryGetUserKey(
       .eq('secret_name', 'GEMINI_API_KEY')
       .maybeSingle();
     
-    if (!userSecret?.encrypted_value) return { key: null, exhausted: false };
+    // If user has no API key configured at all
+    if (!userSecret?.encrypted_value) {
+      return { key: null, exhausted: false, noKey: true };
+    }
+    
+    // User has a key - now check if it's exhausted for this model today
+    if (modelName) {
+      const exhausted = await isUserKeyExhausted(supabaseService, userId, modelName);
+      if (exhausted) {
+        return { key: null, exhausted: true, noKey: false };
+      }
+    }
     
     // Decrypt using AES-GCM
     const { crypto } = await import("https://deno.land/std@0.168.0/crypto/mod.ts");
@@ -462,9 +490,9 @@ async function tryGetUserKey(
       cryptoKey,
       bytes.slice(12)
     );
-    return { key: decoder.decode(decrypted), exhausted: false };
+    return { key: decoder.decode(decrypted), exhausted: false, noKey: false };
   } catch (e) {
     console.warn(`[keyPoolManager] Failed to get user key:`, e);
-    return { key: null, exhausted: false };
+    return { key: null, exhausted: false, noKey: true };
   }
 }
