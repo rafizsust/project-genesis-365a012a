@@ -19,6 +19,8 @@ import { describeApiError } from '@/lib/apiErrors';
 import { useAuth } from '@/hooks/useAuth';
 import { useTopicCompletions } from '@/hooks/useTopicCompletions';
 import { useSmartTopicCycle } from '@/hooks/useSmartTopicCycle';
+import { usePendingSpeakingTests } from '@/hooks/usePendingSpeakingTests';
+import { PendingSpeakingTestBanner } from '@/components/speaking/PendingSpeakingTestBanner';
 import { supabase } from '@/integrations/supabase/client';
 import { playCompletionSound, playErrorSound } from '@/lib/sounds';
 import { 
@@ -149,6 +151,9 @@ export default function AIPractice() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const { user } = useAuth();
+  
+  // Check for pending (unsubmitted) speaking tests
+  const { pendingTests, discardTest, hasPendingTests } = usePendingSpeakingTests();
 
   // Form state
   const [activeModule, setActiveModule] = useState<PracticeModule>('reading');
@@ -1064,6 +1069,17 @@ export default function AIPractice() {
               </Button>
             </Link>
           </div>
+
+          {/* Pending Speaking Test Banner */}
+          {hasPendingTests && activeModule === 'speaking' && (
+            <div className="mb-6">
+              <PendingSpeakingTestBanner 
+                pendingTests={pendingTests} 
+                onDiscard={discardTest}
+                variant="full"
+              />
+            </div>
+          )}
 
           {!user && (
             <Card className="mb-6 border-warning/50 bg-warning/5">

@@ -94,46 +94,62 @@ serve(async (req) => {
       if (supabaseServiceKey) {
         const supabaseService = createClient(supabaseUrl, supabaseServiceKey);
         
-        // Find the result for this test
-        const { data: existingResult, error: findError } = await supabaseService
-          .from('ai_practice_results')
-          .select('id, answers')
-          .eq('test_id', testId)
-          .eq('user_id', user.id)
-          .eq('module', 'speaking')
-          .order('completed_at', { ascending: false })
-          .limit(1)
-          .maybeSingle();
+        // Retry logic: result may not exist yet if evaluation is still processing
+        const MAX_RETRIES = 3;
+        const RETRY_DELAY_MS = 3000;
         
-        if (findError) {
-          console.warn(`[upload-speaking-audio] Error finding result:`, findError.message);
-        } else if (existingResult) {
-          // Merge new audio URLs with existing ones
-          const existingAnswers = (existingResult.answers || {}) as Record<string, any>;
-          const existingAudioUrls = existingAnswers.audio_urls || {};
-          const existingFilePaths = existingAnswers.file_paths || {};
-          
-          const mergedAudioUrls = { ...existingAudioUrls, ...uploadedUrls };
-          const mergedFilePaths = { ...existingFilePaths, ...filePaths };
-          
-          const { error: updateError } = await supabaseService
+        for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+          // Find the result for this test
+          const { data: existingResult, error: findError } = await supabaseService
             .from('ai_practice_results')
-            .update({
-              answers: {
-                ...existingAnswers,
-                audio_urls: mergedAudioUrls,
-                file_paths: mergedFilePaths,
-              }
-            })
-            .eq('id', existingResult.id);
+            .select('id, answers')
+            .eq('test_id', testId)
+            .eq('user_id', user.id)
+            .eq('module', 'speaking')
+            .order('completed_at', { ascending: false })
+            .limit(1)
+            .maybeSingle();
           
-          if (updateError) {
-            console.warn(`[upload-speaking-audio] Error updating result:`, updateError.message);
-          } else {
-            console.log(`[upload-speaking-audio] Updated ai_practice_results ${existingResult.id} with ${Object.keys(uploadedUrls).length} audio URLs`);
+          if (findError) {
+            console.warn(`[upload-speaking-audio] Error finding result (attempt ${attempt + 1}):`, findError.message);
+            break;
           }
-        } else {
-          console.log(`[upload-speaking-audio] No result found to update for test ${testId}`);
+          
+          if (existingResult) {
+            // Merge new audio URLs with existing ones
+            const existingAnswers = (existingResult.answers || {}) as Record<string, any>;
+            const existingAudioUrls = existingAnswers.audio_urls || {};
+            const existingFilePaths = existingAnswers.file_paths || {};
+            
+            const mergedAudioUrls = { ...existingAudioUrls, ...uploadedUrls };
+            const mergedFilePaths = { ...existingFilePaths, ...filePaths };
+            
+            const { error: updateError } = await supabaseService
+              .from('ai_practice_results')
+              .update({
+                answers: {
+                  ...existingAnswers,
+                  audio_urls: mergedAudioUrls,
+                  file_paths: mergedFilePaths,
+                }
+              })
+              .eq('id', existingResult.id);
+            
+            if (updateError) {
+              console.warn(`[upload-speaking-audio] Error updating result:`, updateError.message);
+            } else {
+              console.log(`[upload-speaking-audio] Updated ai_practice_results ${existingResult.id} with ${Object.keys(uploadedUrls).length} audio URLs`);
+            }
+            break; // Success - exit retry loop
+          } else {
+            // Result not found yet - wait and retry
+            if (attempt < MAX_RETRIES - 1) {
+              console.log(`[upload-speaking-audio] No result found for test ${testId}, retrying in ${RETRY_DELAY_MS}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
+              await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+            } else {
+              console.log(`[upload-speaking-audio] No result found for test ${testId} after ${MAX_RETRIES} attempts - audio URLs stored but not linked to result`);
+            }
+          }
         }
       }
     }

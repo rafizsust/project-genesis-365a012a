@@ -620,7 +620,7 @@ async function processTextBasedEvaluation(job: any, supabaseService: any, appEnc
             model: modelName,
             generationConfig: { 
               temperature: 0.3, 
-              maxOutputTokens: 32000, // Increased from 8000 to handle long transcripts with modelAnswers
+              maxOutputTokens: 8000, // Reduced from 32000 - concise output mode
               responseMimeType: 'application/json', // Force JSON output
             },
           });
@@ -785,9 +785,7 @@ async function processTextBasedEvaluation(job: any, supabaseService: any, appEnc
       question_results: evaluationResult,
       answers: {
         audio_urls: audioUrls,
-        transcripts,  // Include the rich transcript data
-        transcripts_by_part: evaluationResult?.transcripts_by_part || {},
-        transcripts_by_question: evaluationResult?.transcripts_by_question || {},
+        transcripts, // Include the rich transcript data (we store input transcripts, not echoed from Gemini)
         file_paths,
       },
       evaluation_timing: evaluationTimingText,
@@ -873,248 +871,71 @@ function buildTextPrompt(
 
   const numSegments = orderedSegments.length;
 
-  return `You are an OFFICIAL IELTS SPEAKING EXAMINER operating under strict British Council and IDP examination standards.
+  return `IELTS Speaking Examiner - Evaluate this candidate strictly per official IELTS band descriptors.
+
+CONTEXT: Topic: ${topic} | Difficulty: ${difficulty} | Responses: ${numSegments}
+${fluencyFlag ? '⚠️ Part 2 under 80s - apply fluency penalty.' : ''}
 
 ═══════════════════════════════════════════════════════════════════════════════
-CRITICAL EXAMINATION PROTOCOL
-═══════════════════════════════════════════════════════════════════════════════
-
-You MUST evaluate this candidate EXACTLY as a real IELTS examiner would in an official test center. Your assessment must be:
-
-1. **INDISTINGUISHABLE FROM HUMAN EXAMINER** - Your scores must match what a certified IELTS examiner would give in a live test. No inflation. No deflation.
-
-2. **STRICTLY OBJECTIVE** - Personal opinions are irrelevant. Only the official IELTS Band Descriptors determine the score. Every score must be justified by specific evidence from the candidate's speech.
-
-3. **PROFESSIONALLY CALIBRATED** - Band 9 is exceptionally rare (native-level fluency with no errors). Band 7+ requires consistent demonstration of complex language use. Most candidates score 5.5-6.5.
-
-4. **EVIDENCE-BASED SCORING** - Each band score MUST be supported by:
-   - Direct quotes from the candidate's response
-   - Specific examples of strengths and weaknesses
-   - Clear explanation of why the score is NOT higher or lower
-
-═══════════════════════════════════════════════════════════════════════════════
-EXAMINATION CONTEXT
-═══════════════════════════════════════════════════════════════════════════════
-
-Topic: ${topic} | Difficulty Level: ${difficulty} | Total Responses: ${numSegments}
-${fluencyFlag ? '⚠️ FLUENCY PENALTY APPLICABLE: Part 2 speaking time below 80 seconds indicates insufficient response length.' : ''}
-
-═══════════════════════════════════════════════════════════════════════════════
-TRANSCRIPT CORRECTION PROTOCOL
-═══════════════════════════════════════════════════════════════════════════════
-
-The transcripts below contain SPEECH RECOGNITION ERRORS from browser-based transcription.
-Apply your expertise to INTELLIGENTLY CORRECT obvious errors while preserving the candidate's actual language use.
-
-Example corrections:
-- "10 kilo would like" → "The skill I would like"
-- "I'm gonna go to" → "I'm going to go to" (preserve informal register if candidate used it)
-
-DO NOT:
-- Add vocabulary the candidate did not use
-- Correct grammatical errors (those reflect the candidate's actual language ability)
-- Change the meaning or content of responses
-
-═══════════════════════════════════════════════════════════════════════════════
-CANDIDATE RESPONSES (Raw Transcripts - Correct Recognition Errors Only)
+CANDIDATE RESPONSES (Speech Recognition Transcripts - Correct Obvious Errors)
 ═══════════════════════════════════════════════════════════════════════════════
 
 ${segmentSummaries}
 
 ═══════════════════════════════════════════════════════════════════════════════
-OFFICIAL IELTS SPEAKING BAND DESCRIPTORS (MANDATORY APPLICATION)
+BAND DESCRIPTORS (Apply Strictly)
 ═══════════════════════════════════════════════════════════════════════════════
 
-FLUENCY AND COHERENCE (FC):
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• Band 9: Speaks fluently with only rare repetition or self-correction. Any hesitation is content-related. Develops topics fully and coherently.
-• Band 8: Speaks fluently with only occasional repetition or self-correction. Hesitation is usually content-related. Develops topics coherently.
-• Band 7: Speaks at length without noticeable effort or loss of coherence. May demonstrate language-related hesitation. Uses range of connectives.
-• Band 6: Is willing to speak at length though may lose coherence due to occasional repetition, self-correction or hesitation. Uses connectives but not always appropriately.
-• Band 5: Maintains flow of speech but uses repetition, self-correction and/or slow speech to keep going. May over-use certain connectives.
-• Band 4: Cannot respond without noticeable pauses. Speech may be slow. Frequently repeats and/or self-corrects.
+FLUENCY & COHERENCE: 9=fluent/rare hesitation | 7=speaks at length/some hesitation | 5=maintains flow with repetition | 4=frequent pauses
+LEXICAL RESOURCE: 9=full flexibility/idiomatic | 7=flexible/some less common vocab | 5=limited/pauses for words | 4=basic/repetitive
+GRAMMAR: 9=full range/accurate | 7=complex structures/mostly error-free | 5=basic forms/limited complex | 4=basic only
+PRONUNCIATION: 9=full range/precise | 7=most Band 8 features | 5=some issues/mispronunciations | 4=limited/often unintelligible
 
-LEXICAL RESOURCE (LR):
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• Band 9: Uses vocabulary with full flexibility and precision. Uses idiomatic language naturally and accurately.
-• Band 8: Uses a wide vocabulary resource readily and flexibly. Uses less common and idiomatic vocabulary skillfully.
-• Band 7: Uses vocabulary resource flexibly to discuss variety of topics. Uses some less common and idiomatic vocabulary.
-• Band 6: Has a wide enough vocabulary for topic but sometimes lacks precision. Uses paraphrase effectively.
-• Band 5: Manages to talk about familiar and unfamiliar topics but uses vocabulary with limited flexibility. May make errors in word choice.
-• Band 4: Uses basic vocabulary for familiar topics. Frequently makes errors. Rarely attempts paraphrase.
-
-GRAMMATICAL RANGE AND ACCURACY (GRA):
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• Band 9: Uses a full range of structures naturally and appropriately. Consistently produces accurate structures.
-• Band 8: Uses a wide range of structures flexibly. Majority of sentences are error-free. Makes only occasional mistakes.
-• Band 7: Uses a range of complex structures with some flexibility. Frequently produces error-free sentences though some grammatical mistakes persist.
-• Band 6: Uses a mix of simple and complex structures but with limited flexibility. May make frequent mistakes with complex structures.
-• Band 5: Produces basic sentence forms with reasonable accuracy. Uses limited range of complex structures.
-• Band 4: Uses only basic sentence forms. Makes frequent errors. Rarely uses complex structures.
-
-PRONUNCIATION (P) - Assessed via Speech Recognition Patterns:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• Band 9: Uses full range of pronunciation features with precision and subtlety. Effortlessly comprehensible throughout.
-• Band 8: Uses a wide range of features. Sustains flexible use of features with only occasional lapses. Easy to understand.
-• Band 7: Shows all positive features of Band 6 and some of Band 8. Generally easy to understand.
-• Band 6: Uses range of features with mixed control. Can generally be understood but mispronunciation occasionally causes strain.
-• Band 5: Shows some effective use of features but not sustained. Mispronunciations are frequent and cause some difficulty.
-• Band 4: Uses limited range of features. Frequently unintelligible.
-
-NOTE: Pronunciation is estimated from speech recognition confidence patterns. Include disclaimer in output.
+NOTE: Pronunciation is estimated from speech patterns. Apply -0.5 adjustment (done automatically).
 
 ═══════════════════════════════════════════════════════════════════════════════
-SCORING CALIBRATION GUIDANCE
+CONCISE JSON OUTPUT (Keep responses short - max 4000 chars total)
 ═══════════════════════════════════════════════════════════════════════════════
-
-AVOID THESE COMMON ERRORS:
-✗ Giving Band 7+ for simple vocabulary even if error-free (complexity required)
-✗ Giving Band 8+ unless candidate demonstrates exceptional, near-native fluency
-✗ Inflating scores due to interesting content (we assess LANGUAGE, not ideas)
-✗ Deflating scores due to accent (intelligibility matters, not accent type)
-✗ Giving same band across all criteria (candidates typically vary ±1 band between criteria)
-
-CALIBRATION CHECKPOINTS:
-• Is this score justified by SPECIFIC examples from the transcript?
-• Would a certified IELTS examiner agree with this score?
-• Have I applied ALL relevant descriptors, not just favorable ones?
-• Am I assessing LANGUAGE ABILITY, not personality or content?
-
-═══════════════════════════════════════════════════════════════════════════════
-WEAKNESS FORMAT (CRITICAL FOR USER LEARNING)
-═══════════════════════════════════════════════════════════════════════════════
-
-Each weakness in the criteria MUST include an example quote from the transcript so users understand exactly where they made mistakes.
-
-Format: "Issue description. Example: 'exact quote from transcript demonstrating the issue'"
-
-Examples:
-✓ "Frequent hesitations interrupt flow. Example: 'I think... um... it's like... you know... important'"
-✓ "Limited vocabulary range for describing emotions. Example: 'I felt happy' instead of more nuanced expressions"
-✓ "Subject-verb agreement errors. Example: 'The people was going' should be 'The people were going'"
-
-═══════════════════════════════════════════════════════════════════════════════
-REQUIRED JSON OUTPUT FORMAT
-═══════════════════════════════════════════════════════════════════════════════
-
-MODEL ANSWER WORD COUNTS (STRICT):
-- Part 1: 30-40 words (natural, conversational)
-- Part 2: 120-140 words (covers all cue card points)
-- Part 3: 50-55 words (concise analytical with one example)
-
-LENGTH ASSESSMENT: NEVER criticize responses for being too long. Only flag if TOO SHORT.
 
 \`\`\`json
 {
   "overall_band": 6.5,
-  "part_scores": {
-    "part1": 6.0,
-    "part2": 6.5,
-    "part3": 6.5
-  },
   "criteria": {
-    "fluency_coherence": { "band": 6.5, "feedback": "...", "strengths": ["str1", "str2"], "weaknesses": ["Issue + Example: 'quote from transcript'"], "suggestions": ["tip1"] },
-    "lexical_resource": { "band": 6.0, "feedback": "...", "strengths": ["str1", "str2"], "weaknesses": ["Issue + Example: 'quote from transcript'"], "suggestions": ["tip1"] },
-    "grammatical_range": { "band": 6.5, "feedback": "...", "strengths": ["str1", "str2"], "weaknesses": ["Issue + Example: 'quote from transcript'"], "suggestions": ["tip1"] },
-    "pronunciation": { "band": 6.0, "feedback": "...", "strengths": ["str1", "str2"], "weaknesses": ["Issue + Example: 'quote from transcript'"], "suggestions": ["tip1"], "disclaimer": "Estimated from speech recognition patterns" }
+    "fluency_coherence": { "band": 6.5, "feedback": "1-2 sentences", "strengths": ["max 2"], "weaknesses": ["max 2 with quote"], "suggestions": ["max 2"] },
+    "lexical_resource": { "band": 6.0, "feedback": "1-2 sentences", "strengths": ["max 2"], "weaknesses": ["max 2 with quote"], "suggestions": ["max 2"] },
+    "grammatical_range": { "band": 6.5, "feedback": "1-2 sentences", "strengths": ["max 2"], "weaknesses": ["max 2 with quote"], "suggestions": ["max 2"] },
+    "pronunciation": { "band": 6.0, "feedback": "1-2 sentences", "strengths": ["max 2"], "weaknesses": ["max 2"], "suggestions": ["max 2"] }
   },
-  "summary": "Examiner's overall assessment summary (2-3 sentences)",
-  "examiner_notes": "Professional observation on candidate's key areas for development",
-  "vocabulary_upgrades": [
-    {
-      "type": "vocabulary",
-      "original": "phrase candidate used correctly",
-      "upgraded": "higher band alternative",
-      "context": "verbatim substring from transcript showing usage"
-    }
-  ],
-  "recognition_corrections": [
-    {
-      "type": "correction",
-      "captured": "what speech recognition heard",
-      "intended": "what candidate actually said",
-      "context": "corrected phrase in full sentence"
-    }
-  ],
-  "lexical_upgrades": [{"original": "word used", "upgraded": "target band alternative", "context": "usage example"}],
-  "part_analysis": [
-    {
-      "part_number": 1,
-      "performance_notes": "Part 1 assessment",
-      "key_moments": ["Positive moment 1"],
-      "areas_for_improvement": ["Area 1 with example quote"]
-    }
-  ],
-  "transcripts_by_part": {
-    "1": "Combined corrected transcript for Part 1...",
-    "2": "Combined corrected transcript for Part 2...",
-    "3": "Combined corrected transcript for Part 3..."
-  },
-  "transcripts_by_question": {
-    "1": [{"segment_key": "part1-q...", "question_number": 1, "question_text": "...", "transcript": "..."}],
-    "2": [{"segment_key": "part2-q...", "question_number": 1, "question_text": "...", "transcript": "..."}],
-    "3": [{"segment_key": "part3-q...", "question_number": 1, "question_text": "...", "transcript": "..."}]
-  },
+  "summary": "2 sentence overall assessment",
+  "examiner_notes": "1 sentence key development area",
+  "vocabulary_upgrades": [{"original": "...", "upgraded": "...", "context": "..."}],
+  "part_analysis": [{"part_number": 1, "performance_notes": "1 sentence", "key_moments": ["1 item"], "areas_for_improvement": ["1 item"]}],
   "modelAnswers": [
     {
-      "segment_key": "part1-q...",
+      "segment_key": "${orderedSegments[0]?.key || 'part1-q...'}",
       "partNumber": 1,
       "questionNumber": 1,
       "question": "Question text",
-      "candidateResponse": "Corrected transcript (speech recognition errors fixed)",
+      "candidateResponse": "Corrected transcript",
       "estimatedBand": 5.5,
       "targetBand": 6.5,
-      "modelAnswer": "Target band model response (1 band above candidate's score)",
-      "whyItWorks": ["Uses sophisticated vocabulary", "Demonstrates complex grammar", "Maintains fluent delivery"],
-      "keyImprovements": ["Specific improvement 1", "Specific improvement 2"]
+      "modelAnswer": "Part1=35 words, Part2=80 words, Part3=45 words MAX",
+      "whyItWorks": ["max 2 points"],
+      "keyImprovements": ["max 2 points"]
     }
   ]
 }
 \`\`\`
 
-═══════════════════════════════════════════════════════════════════════════════
-LEXICAL OUTPUT INSTRUCTIONS
-═══════════════════════════════════════════════════════════════════════════════
+CRITICAL RULES:
+1. Return EXACTLY ${numSegments} modelAnswers (one per segment)
+2. Use EXACT segment_keys from input: ${orderedSegments.map(s => s.key).join(', ')}
+3. Keep model answers SHORT: Part1=35w, Part2=80w, Part3=45w
+4. Max 2 items per array (strengths, weaknesses, etc.)
+5. Omit vocabulary_upgrades if none needed
+6. DO NOT return transcripts_by_part or transcripts_by_question (we have them already)
 
-IMPORTANT: Separate TWO types of lexical feedback:
-
-1. **vocabulary_upgrades**: For phrases the candidate said CORRECTLY, but could use a higher-band alternative
-   - "original": the phrase they actually used (correct English)
-   - "upgraded": the higher-band alternative
-   - "context": MUST be a verbatim substring from the transcript
-
-2. **recognition_corrections**: For speech recognition ERRORS (what was misheard)
-   - "captured": what the speech recognition transcribed (garbled/wrong)
-   - "intended": what the candidate actually said
-   - "context": the corrected full sentence
-
-Also include combined "lexical_upgrades" array for backward compatibility.
-
-═══════════════════════════════════════════════════════════════════════════════
-ADAPTIVE MODEL ANSWERS
-═══════════════════════════════════════════════════════════════════════════════
-
-CRITICAL - UNIFIED TARGET BAND FOR ALL MODEL ANSWERS:
-1. Find the HIGHEST band score among all 4 criteria (FC, LR, GRA, P)
-2. Set targetBand = highest_criteria_score + 1 (max 9)
-3. ALL modelAnswers must use the SAME targetBand
-
-Example: If criteria are FC=6, LR=6, GRA=5.5, P=6 → highest=6 → targetBand=7 for ALL answers
-This ensures model answers show the next achievable level based on user's best performance.
-
-═══════════════════════════════════════════════════════════════════════════════
-FINAL INSTRUCTIONS
-═══════════════════════════════════════════════════════════════════════════════
-
-1. Return EXACTLY ${numSegments} modelAnswers (one per segment above)
-2. Use the EXACT segment_key from input (e.g., "part1-q123")
-3. Provide CORRECTED transcript as candidateResponse
-4. Generate REALISTIC model answers at targetBand level (1 band above candidate)
-5. Include part_analysis for each part with responses
-6. Group transcripts by part and by question
-7. Separate vocabulary_upgrades from recognition_corrections
-
-Return ONLY valid JSON. No preamble. No explanation.`;
+Return ONLY valid JSON. No preamble.`;
 }
 
 function buildPrompt(
