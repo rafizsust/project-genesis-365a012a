@@ -37,21 +37,9 @@ interface ModelConfig {
 // All models tracked in the system
 const GEMINI_MODELS: ModelConfig[] = [
   {
-    id: 'gemini_2_0_flash',
-    displayName: '2.0 Flash',
-    description: 'Speaking evaluation primary',
-    apiName: 'gemini-2.0-flash',
-  },
-  {
-    id: 'gemini_2_0_flash_lite',
-    displayName: '2.0 Flash Lite',
-    description: 'Answer explanations, fast tasks',
-    apiName: 'gemini-2.0-flash-lite',
-  },
-  {
     id: 'gemini_2_5_flash',
     displayName: '2.5 Flash',
-    description: 'Speaking/writing evaluation backup',
+    description: 'Speaking evaluation primary',
     apiName: 'gemini-2.5-flash',
   },
   {
@@ -71,6 +59,18 @@ const GEMINI_MODELS: ModelConfig[] = [
     displayName: '3 Pro',
     description: 'Writing evaluation primary',
     apiName: 'gemini-3-pro-preview',
+  },
+  {
+    id: 'gemini_2_0_flash',
+    displayName: '2.0 Flash',
+    description: 'Legacy (deprecated)',
+    apiName: 'gemini-2.0-flash',
+  },
+  {
+    id: 'gemini_2_0_flash_lite',
+    displayName: '2.0 Flash Lite',
+    description: 'Answer explanations, fast tasks',
+    apiName: 'gemini-2.0-flash-lite',
   },
 ];
 

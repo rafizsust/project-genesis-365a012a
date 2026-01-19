@@ -22,13 +22,13 @@ import {
 
 // All Gemini models tracked in the system
 const GEMINI_MODELS = [
-  { id: 'gemini-2.0-flash', displayName: '2.0 Flash', description: 'Speaking evaluation primary' },
-  { id: 'gemini-2.0-flash-lite', displayName: '2.0 Flash Lite', description: 'Answer explanations' },
-  { id: 'gemini-2.0-flash-lite-preview-02-05', displayName: '2.0 Flash Lite Preview', description: 'Backup audio' },
-  { id: 'gemini-2.5-flash', displayName: '2.5 Flash', description: 'Evaluation backup' },
+  { id: 'gemini-2.5-flash', displayName: '2.5 Flash', description: 'Speaking evaluation primary' },
   { id: 'gemini-2.5-flash-preview-tts', displayName: '2.5 Flash TTS', description: 'Audio generation' },
-  { id: 'gemini-2.5-pro', displayName: '2.5 Pro', description: 'Writing evaluation' },
-  { id: 'gemini-3-pro-preview', displayName: '3 Pro', description: 'Writing primary' },
+  { id: 'gemini-2.5-pro', displayName: '2.5 Pro', description: 'Writing evaluation backup' },
+  { id: 'gemini-3-pro-preview', displayName: '3 Pro', description: 'Writing evaluation primary' },
+  { id: 'gemini-2.0-flash', displayName: '2.0 Flash', description: 'Legacy (deprecated)' },
+  { id: 'gemini-2.0-flash-lite', displayName: '2.0 Flash Lite', description: 'Answer explanations' },
+  { id: 'gemini-2.0-flash-lite-preview-02-05', displayName: '2.0 Flash Lite Preview', description: 'Backup tasks' },
 ];
 
 interface ModelHealthData {
