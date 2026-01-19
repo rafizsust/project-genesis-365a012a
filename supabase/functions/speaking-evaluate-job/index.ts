@@ -7,7 +7,6 @@ import {
   markModelQuotaExhausted,
   isQuotaExhaustedError,
   isDailyQuotaExhaustedError,
-  isModelExhaustedForKey
 } from "../_shared/apiKeyQuotaUtils.ts";
 import { 
   createPerformanceLogger,
@@ -45,6 +44,9 @@ const AI_CALL_TIMEOUT_MS = 90000;
 // Rate limiting delays
 const BASE_RETRY_DELAY_MS = 5000;
 const MAX_RETRY_DELAY_MS = 60000;
+
+// Inter-part delay for RPM quota reset (prevents 429 errors)
+const INTER_PART_DELAY_MS = 5000;
 const KEY_SWITCH_DELAY_MS = 2000;
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
@@ -288,11 +290,14 @@ serve(async (req) => {
       .eq('id', jobId)
       .eq('lock_token', lockToken);
 
-    // Build API key queue
+    // =========================================================================
+    // API KEY MUTEX: Checkout a locked API key for this job
+    // =========================================================================
     interface KeyCandidate { key: string; keyId: string | null; isUserProvided: boolean; }
     const keyQueue: KeyCandidate[] = [];
+    let mutexKeyId: string | null = null; // Track locked key for cleanup
 
-    // User's key first
+    // User's key first (not subject to mutex)
     const { data: userSecret } = await supabaseService
       .from('user_secrets')
       .select('encrypted_value')
@@ -309,14 +314,30 @@ serve(async (req) => {
       }
     }
 
-    // Admin keys - get keys available for ALL models we might use
-    const dbApiKeys = await getActiveGeminiKeysForModels(supabaseService, GEMINI_MODELS);
-    for (const dbKey of dbApiKeys) {
-      keyQueue.push({ key: dbKey.key_value, keyId: dbKey.id, isUserProvided: false });
+    // Try to checkout (lock) an admin API key using database mutex
+    // This prevents multiple concurrent jobs from hitting the same key
+    const { data: lockedKeyRows } = await supabaseService.rpc('checkout_api_key', {
+      p_job_id: jobId,
+      p_model_name: GEMINI_MODELS[0], // Primary model
+      p_lock_minutes: 2,
+    });
+
+    if (lockedKeyRows && lockedKeyRows.length > 0) {
+      const lockedKey = lockedKeyRows[0];
+      mutexKeyId = lockedKey.key_id;
+      keyQueue.push({ key: lockedKey.key_value, keyId: lockedKey.key_id, isUserProvided: false });
+      console.log(`[speaking-evaluate-job] Mutex: Locked API key ${mutexKeyId?.slice(0, 8)}... for job ${jobId}`);
+    } else {
+      // Fallback: get keys without mutex (legacy behavior)
+      console.warn('[speaking-evaluate-job] Mutex: No key available via mutex, falling back to legacy key selection');
+      const dbApiKeys = await getActiveGeminiKeysForModels(supabaseService, GEMINI_MODELS);
+      for (const dbKey of dbApiKeys) {
+        keyQueue.push({ key: dbKey.key_value, keyId: dbKey.id, isUserProvided: false });
+      }
     }
 
     if (keyQueue.length === 0) throw new Error('No API keys available');
-    console.log(`[speaking-evaluate-job] Key queue: ${keyQueue.length} keys`);
+    console.log(`[speaking-evaluate-job] Key queue: ${keyQueue.length} keys (mutex locked: ${!!mutexKeyId})`);
 
     // Determine which part to evaluate next
     const currentPart = (job.current_part as number) || 0;
@@ -376,16 +397,8 @@ serve(async (req) => {
           for (const modelName of GEMINI_MODELS) {
             if (partResult) break;
 
-            // CRITICAL FIX: Skip models already marked as exhausted for this key
-            // This prevents retrying exhausted models across different keys
-            if (!candidateKey.isUserProvided && candidateKey.keyId) {
-              // Need to re-fetch the key's quota status from the dbApiKeys we have
-              const keyRecord = dbApiKeys.find(k => k.id === candidateKey.keyId);
-              if (keyRecord && isModelExhaustedForKey(keyRecord, modelName)) {
-                console.log(`[speaking-evaluate-job] Skipping ${modelName} - already exhausted for key ${candidateKey.keyId.slice(0,8)}...`);
-                continue;
-              }
-            }
+            // Note: With mutex locking, we're using a single locked key per part
+            // Model exhaustion checking is handled by the checkout_api_key function
 
             console.log(`[speaking-evaluate-job] Part ${partToProcess}: trying ${modelName}`);
             const callStart = Date.now();
@@ -451,13 +464,6 @@ serve(async (req) => {
                   
                   if (!candidateKey.isUserProvided && candidateKey.keyId) {
                     await markModelQuotaExhausted(supabaseService, candidateKey.keyId, modelName);
-                    // Refresh the key record in our local cache so subsequent iterations skip this model
-                    const keyIdx = dbApiKeys.findIndex(k => k.id === candidateKey.keyId);
-                    if (keyIdx !== -1) {
-                      const today = new Date().toISOString().split('T')[0];
-                      // Update the local cache to reflect exhaustion
-                      (dbApiKeys[keyIdx] as any)[`${modelName.replace(/-/g, '_').replace(/\./g, '_')}_exhausted`] = true;
-                    }
                   }
                   
                   // CRITICAL: Continue to next model instead of throwing
@@ -530,11 +536,17 @@ serve(async (req) => {
       heartbeatInterval = null;
     }
 
-    // Add delay between part evaluations to prevent API key burst
-    // This is especially important for users with single API keys
+    // Release API key mutex after completing this part
+    if (mutexKeyId) {
+      console.log(`[speaking-evaluate-job] Mutex: Releasing API key ${mutexKeyId.slice(0, 8)}...`);
+      await supabaseService.rpc('release_api_key', { p_job_id: jobId });
+    }
+
+    // CRITICAL: Add 5-second delay between part evaluations for RPM quota reset
+    // This prevents 429 "Too Many Requests" errors when evaluating multiple parts
     if (partToProcess && partsToEvaluate.length > 1) {
-      console.log(`[speaking-evaluate-job] Cooling down 2s before next part evaluation...`);
-      await sleep(2000);
+      console.log(`[speaking-evaluate-job] Rate limit cooldown: waiting ${INTER_PART_DELAY_MS / 1000}s before next part...`);
+      await sleep(INTER_PART_DELAY_MS);
     }
 
     // Check if all parts are done
@@ -684,6 +696,16 @@ serve(async (req) => {
 
     if (heartbeatInterval) {
       clearInterval(heartbeatInterval);
+    }
+
+    // Release API key mutex on error
+    if (jobId) {
+      try {
+        await supabaseService.rpc('release_api_key', { p_job_id: jobId });
+        console.log(`[speaking-evaluate-job] Mutex: Released API key on error for job ${jobId}`);
+      } catch (releaseErr) {
+        console.warn('[speaking-evaluate-job] Failed to release API key mutex:', releaseErr);
+      }
     }
 
     if (jobId) {
