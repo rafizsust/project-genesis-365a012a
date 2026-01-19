@@ -14,6 +14,7 @@ import {
   computeWeightedPartBand,
   corsHeaders,
 } from "../_shared/speakingUtils.ts";
+import { getFromR2 } from "../_shared/r2Client.ts";
 import {
   checkoutKeyForPart,
   releaseKeyWithCooldown,
@@ -163,12 +164,52 @@ serve(async (req) => {
 
     // Detect if this is legacy format (Google File URIs) or new format (inline base64)
     const firstEntry = Object.values(inlineAudioData)[0];
-    const isLegacyFormat = !!firstEntry.fileUri && !firstEntry.base64;
+    let isLegacyFormat = !!firstEntry.fileUri && !firstEntry.base64;
     
     if (isLegacyFormat) {
-      console.log(`[speaking-evaluate-job] Detected LEGACY format (Google File URIs) - falling back to old flow`);
-      // For legacy jobs, we need to continue with the old approach
-      // This ensures backward compatibility during migration
+      console.log(`[speaking-evaluate-job] Detected LEGACY format (Google File URIs) - converting to inline base64 from R2`);
+      
+      // Download audio files from R2 and convert to inline base64
+      const filePaths = job.file_paths as Record<string, string> || {};
+      let convertedCount = 0;
+      let failedCount = 0;
+      
+      for (const segmentKey of Object.keys(inlineAudioData)) {
+        const legacyData = inlineAudioData[segmentKey] as any;
+        const r2Path = filePaths[segmentKey];
+        
+        if (r2Path) {
+          try {
+            const r2Result = await getFromR2(r2Path);
+            if (r2Result.success && r2Result.bytes) {
+              // Convert to base64
+              const base64 = btoa(String.fromCharCode(...r2Result.bytes));
+              // Update the entry with inline data
+              (inlineAudioData[segmentKey] as any).base64 = base64;
+              (inlineAudioData[segmentKey] as any).mimeType = r2Result.contentType || legacyData.mimeType || 'audio/mpeg';
+              convertedCount++;
+            } else {
+              console.warn(`[speaking-evaluate-job] Failed to download ${segmentKey} from R2: ${r2Result.error}`);
+              failedCount++;
+            }
+          } catch (e) {
+            console.error(`[speaking-evaluate-job] Error downloading ${segmentKey}:`, e);
+            failedCount++;
+          }
+        } else {
+          console.warn(`[speaking-evaluate-job] No R2 path for segment ${segmentKey}`);
+          failedCount++;
+        }
+      }
+      
+      console.log(`[speaking-evaluate-job] Converted ${convertedCount} audio files from R2, ${failedCount} failed`);
+      
+      if (failedCount > 0 && convertedCount === 0) {
+        throw new Error(`Failed to download all audio files from storage. Please re-record your responses.`);
+      }
+      
+      // Mark as no longer legacy since we now have inline data
+      isLegacyFormat = false;
     }
 
     console.log(`[speaking-evaluate-job] Claimed job ${jobId}, ${Object.keys(inlineAudioData).length} audio segments`);
@@ -366,6 +407,12 @@ serve(async (req) => {
       currentKeyId = keyResult.keyId;
       const apiKey = keyResult.keyValue;
       const isUserKey = keyResult.isUserKey;
+
+      // Validate key data
+      if (!currentKeyId || !apiKey) {
+        console.error(`[speaking-evaluate-job] Invalid key checkout result:`, JSON.stringify(keyResult));
+        throw new Error('Key checkout returned invalid data. Please try again.');
+      }
 
       console.log(`[speaking-evaluate-job] Part ${partToProcess}: Using ${isUserKey ? 'user' : 'admin'} key ${currentKeyId.slice(0, 8)}...`);
 
