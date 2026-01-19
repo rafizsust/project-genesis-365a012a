@@ -24,6 +24,7 @@ import {
   deleteAudioSegments,
   loadAudioSegments,
   cleanupOldAudio,
+  type PersistedAudioSegment,
 } from '@/hooks/useSpeakingAudioPersistence';
 import {
   Clock,
@@ -41,7 +42,7 @@ import { useAudioPreloader } from '@/hooks/useAudioPreloader';
 import { SubmissionErrorState } from '@/components/common/SubmissionErrorState';
 import { ApiErrorDescriptor } from '@/lib/apiErrors';
 import { cn } from '@/lib/utils';
-import { AudioLevelIndicator, AudioVolumeControl, AudioWaveformIndicator } from '@/components/speaking';
+import { AudioLevelIndicator, AudioVolumeControl, AudioWaveformIndicator, SpeakingStateRestoreDialog } from '@/components/speaking';
 import { useFullscreenTest } from '@/hooks/useFullscreenTest';
 import { compressAudio } from '@/utils/audioCompressor';
 import { useAdvancedSpeechAnalysis, SpeechAnalysisResult } from '@/hooks/useAdvancedSpeechAnalysis';
@@ -129,7 +130,10 @@ export default function AIPracticeSpeakingTest() {
   const [sharedAudio, setSharedAudio] = useState<Record<string, { audio_url: string | null; fallback_text: string }>>({});
   const [sharedAudioFetched, setSharedAudioFetched] = useState(false);
   const [showExitDialog, setShowExitDialog] = useState(false);
-
+  
+  // State restoration dialog for interrupted tests
+  const [showRestoreDialog, setShowRestoreDialog] = useState(false);
+  const [persistedSegmentsForRestore, setPersistedSegmentsForRestore] = useState<PersistedAudioSegment[]>([]);
   // Guards to prevent background submission/evaluation from hijacking navigation after exit
   const isMountedRef = useRef(true);
   const exitRequestedRef = useRef(false);
@@ -1983,7 +1987,7 @@ export default function AIPracticeSpeakingTest() {
       if (persistedSegments.length > 0) {
         console.log(`[AIPracticeSpeakingTest] Found ${persistedSegments.length} persisted audio segments`);
         
-        // Restore audio segments
+        // Restore audio segments to state
         const restoredSegments: Record<string, AudioSegmentMeta> = {};
         for (const seg of persistedSegments) {
           const originalKey = seg.key.replace(`${testId}_`, '');
@@ -1999,11 +2003,11 @@ export default function AIPracticeSpeakingTest() {
         }
         setAudioSegments(restoredSegments);
         
-        // Ask user if they want to resubmit
-        toast({
-          title: 'Previous Recording Found',
-          description: 'Your previous recording was recovered. You can submit it or restart the test.',
-        });
+        // Store persisted segments for the restoration dialog
+        setPersistedSegmentsForRestore(persistedSegments);
+        
+        // Show restoration dialog instead of just a toast
+        setShowRestoreDialog(true);
       }
 
       setTest(loadedTest);
@@ -2106,6 +2110,73 @@ export default function AIPracticeSpeakingTest() {
     }
   };
   
+  // Handler for resuming test from where left off (restoration dialog)
+  const handleResumeTest = useCallback((resumePoint: { part: 1 | 2 | 3; questionIndex: number }) => {
+    setShowRestoreDialog(false);
+    setShowMicrophoneTest(false);
+    
+    // Start test timer for global timeout protection
+    testStartTimeRef.current = Date.now();
+    
+    // Set state to resume from the specified point
+    setCurrentPart(resumePoint.part);
+    setQuestionIndex(resumePoint.questionIndex);
+    
+    // Enter fullscreen mode
+    enterFullscreen();
+    
+    // Prefetch audio for the resuming part
+    prefetchPartAudio(resumePoint.part);
+    
+    // Start from the appropriate phase based on part
+    if (resumePoint.part === 1) {
+      setPhase('part1_intro');
+      if (speakingParts.part1?.instruction) {
+        speakText(speakingParts.part1.instruction, 'part1_intro');
+      }
+    } else if (resumePoint.part === 2) {
+      startPart2();
+    } else {
+      startPart3();
+    }
+    
+    toast({
+      title: 'Test Resumed',
+      description: `Continuing from Part ${resumePoint.part}${resumePoint.questionIndex > 0 ? `, Question ${resumePoint.questionIndex + 1}` : ''}`,
+    });
+  }, [enterFullscreen, speakingParts, toast]);
+  
+  // Handler for submitting existing recordings from restoration dialog
+  const handleSubmitFromRestore = useCallback(async () => {
+    setShowRestoreDialog(false);
+    setShowMicrophoneTest(false);
+    
+    // Trigger submission by going to ending phase
+    setPhase('ending');
+  }, []);
+  
+  // Handler for restarting test fresh (clearing persisted audio)
+  const handleRestartFresh = useCallback(async () => {
+    setShowRestoreDialog(false);
+    
+    // Clear persisted audio
+    if (testId) {
+      await deleteAudioSegments(testId);
+    }
+    
+    // Clear audio segments from state
+    setAudioSegments({});
+    setSegmentAnalyses({});
+    setPersistedSegmentsForRestore([]);
+    
+    toast({
+      title: 'Starting Fresh',
+      description: 'Your previous recordings have been cleared.',
+    });
+    
+    // Continue to microphone test (already showing)
+  }, [testId, toast]);
+  
   // Global test timeout protection - prevents infinite stuck states
   useEffect(() => {
     if (!testStartTimeRef.current) return;
@@ -2185,6 +2256,16 @@ export default function AIPracticeSpeakingTest() {
           onBack={() => navigate('/ai-practice')}
           initialAccent={selectedAccent}
           initialEvaluationMode={evaluationMode}
+        />
+        
+        {/* State Restoration Dialog */}
+        <SpeakingStateRestoreDialog
+          open={showRestoreDialog}
+          segments={persistedSegmentsForRestore}
+          testTopic={test?.topic}
+          onResume={handleResumeTest}
+          onSubmit={handleSubmitFromRestore}
+          onRestart={handleRestartFresh}
         />
       </div>
     );

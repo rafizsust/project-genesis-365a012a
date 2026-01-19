@@ -11,3 +11,4 @@ export { BrowserCompatibilityCheck } from './BrowserCompatibilityCheck';
 export { ModelAnswersAccordion } from './ModelAnswersAccordion';
 export { AccentSelector, BrowserSpeechModeBadge, ACCENT_OPTIONS } from './AccentSelector';
 export type { AccentCode } from './AccentSelector';
+export { SpeakingStateRestoreDialog } from './SpeakingStateRestoreDialog';
