@@ -2,28 +2,32 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { crypto } from "https://deno.land/std@0.168.0/crypto/mod.ts";
 import { getFromR2 } from "../_shared/r2Client.ts";
-import { getActiveGeminiKeysForModel } from "../_shared/apiKeyQuotaUtils.ts";
 import {
-  decryptKey,
-  uploadToGoogleFileAPI,
   corsHeaders,
+  getMimeTypeFromExtension,
 } from "../_shared/speakingUtils.ts";
 
 /**
  * OPTIMIZED Speaking Upload Job - Stage 1 of Speaking Evaluation
- * Uses shared utilities from speakingUtils.ts
+ * 
+ * NEW ARCHITECTURE (v2): Eliminates Google File API
  * 
  * This function ONLY handles:
  * 1. Downloading audio files from R2
- * 2. Uploading them to Google File API
- * 3. Persisting the Google File URIs to the database
+ * 2. Converting them to base64 for inline Gemini calls
+ * 3. Storing the base64 data in the database
  * 
- * This is idempotent - if URIs already exist, it skips upload.
- * Updates heartbeat during long operations to prevent timeout detection.
+ * Benefits:
+ * - No Google File API dependency
+ * - No key-file binding issues
+ * - Per-part key rotation in evaluate job
  */
 
-const HEARTBEAT_INTERVAL_MS = 15000; // Update heartbeat every 15 seconds
+const HEARTBEAT_INTERVAL_MS = 15000;
 const LOCK_DURATION_MINUTES = 5;
+
+// Maximum size for inline audio (Gemini limit is ~20MB per request)
+const MAX_INLINE_AUDIO_SIZE_MB = 15;
 
 serve(async (req) => {
   console.log(`[speaking-upload-job] Request at ${new Date().toISOString()}`);
@@ -34,7 +38,6 @@ serve(async (req) => {
 
   const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
   const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
-  const appEncryptionKey = Deno.env.get('app_encryption_key')!;
   const supabaseService = createClient(supabaseUrl, supabaseServiceKey);
 
   let jobId: string | null = null;
@@ -55,9 +58,6 @@ serve(async (req) => {
     const lockToken = crypto.randomUUID();
     const lockExpiresAt = new Date(Date.now() + LOCK_DURATION_MINUTES * 60 * 1000).toISOString();
 
-    // Try to claim the job with a lock - first fetch the job to check conditions
-    const nowIso = new Date().toISOString();
-    
     // First, check if job exists and is claimable
     const { data: existingJob, error: fetchError } = await supabaseService
       .from('speaking_evaluation_jobs')
@@ -96,7 +96,7 @@ serve(async (req) => {
     const noLock = !existingJob.lock_token;
 
     if (!isClaimableStatus || !isClaimableStage || (!noLock && !lockExpired)) {
-      console.log(`[speaking-upload-job] Job ${jobId} not claimable: status=${existingJob.status}, stage=${existingJob.stage}, lockExpired=${lockExpired}, noLock=${noLock}`);
+      console.log(`[speaking-upload-job] Job ${jobId} not claimable: status=${existingJob.status}, stage=${existingJob.stage}`);
       return new Response(JSON.stringify({ 
         success: false, 
         error: 'Job already claimed or in wrong state',
@@ -109,7 +109,7 @@ serve(async (req) => {
       });
     }
 
-    // Now claim the job with an update
+    // Claim the job
     const { data: updatedJobs, error: claimError } = await supabaseService
       .from('speaking_evaluation_jobs')
       .update({
@@ -124,11 +124,10 @@ serve(async (req) => {
       .eq('id', jobId)
       .select();
 
-    if (claimError) {
-      console.error(`[speaking-upload-job] Error claiming job ${jobId}:`, claimError.message);
+    if (claimError || !updatedJobs?.[0]) {
       return new Response(JSON.stringify({ 
         success: false, 
-        error: `Failed to claim job: ${claimError.message}`,
+        error: 'Job claim failed',
         skipped: true 
       }), {
         status: 200,
@@ -136,24 +135,13 @@ serve(async (req) => {
       });
     }
 
-    const job = updatedJobs?.[0];
-    if (!job) {
-      console.log(`[speaking-upload-job] No job returned after update for ${jobId}`);
-      return new Response(JSON.stringify({ 
-        success: false, 
-        error: 'Job claim failed - no data returned',
-        skipped: true 
-      }), {
-        status: 200,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
-    }
-
+    const job = updatedJobs[0];
     console.log(`[speaking-upload-job] Claimed job ${jobId}`);
 
-    // Check if uploads already completed (idempotency)
+    // Check if audio data already exists (idempotency)
+    // We now use google_file_uris field to store inline audio data for compatibility
     if (job.google_file_uris && Object.keys(job.google_file_uris).length > 0) {
-      console.log(`[speaking-upload-job] Uploads already exist, skipping to eval stage`);
+      console.log(`[speaking-upload-job] Audio data already exists, skipping to eval stage`);
       
       await supabaseService
         .from('speaking_evaluation_jobs')
@@ -184,13 +172,12 @@ serve(async (req) => {
           })
           .eq('id', jobId)
           .eq('lock_token', lockToken);
-        console.log(`[speaking-upload-job] Heartbeat updated for ${jobId}`);
       } catch (e) {
         console.error(`[speaking-upload-job] Heartbeat failed:`, e);
       }
     }, HEARTBEAT_INTERVAL_MS);
 
-    const { user_id: userId, file_paths, test_id } = job;
+    const { file_paths, test_id, user_id: userId } = job;
     const filePathsMap = file_paths as Record<string, string>;
 
     // Get test payload for segment metadata
@@ -215,20 +202,16 @@ serve(async (req) => {
       }
     }
 
-    // Build segment ordering - extract part number directly from segment key
-    // Segment keys are formatted as: part{1|2|3}-q{questionId}
-    // We just need to extract the part number, the questionId can contain hyphens
+    // Build segment ordering - extract part number from segment key
     const orderedSegments: Array<{ segmentKey: string; partNumber: 1 | 2 | 3; index: number }> = [];
     
     for (const segmentKey of Object.keys(filePathsMap)) {
-      // Match part number from the beginning of the key: part1-, part2-, or part3-
       const partMatch = String(segmentKey).match(/^part([123])-/);
       if (partMatch) {
         const partNumber = Number(partMatch[1]) as 1 | 2 | 3;
         orderedSegments.push({ segmentKey, partNumber, index: orderedSegments.length });
       } else {
-        // If no part pattern found, still include it with a default ordering
-        console.warn(`[speaking-upload-job] Segment key ${segmentKey} doesn't match part pattern, including anyway`);
+        console.warn(`[speaking-upload-job] Segment key ${segmentKey} doesn't match part pattern`);
         orderedSegments.push({ segmentKey, partNumber: 1, index: orderedSegments.length });
       }
     }
@@ -239,49 +222,17 @@ serve(async (req) => {
       return a.index - b.index;
     });
 
-    console.log(`[speaking-upload-job] Processing ${orderedSegments.length} segments`);
+    console.log(`[speaking-upload-job] Processing ${orderedSegments.length} segments with INLINE audio`);
 
-    // Get an API key for Google File API upload
-    // CRITICAL: We must track which key is used because Google File API files
-    // can ONLY be accessed by the same key that uploaded them
-    let apiKey: string | null = null;
-    let uploadApiKeyId: string | null = null; // Track admin key ID for persistence
-    let isUserProvidedKey = false;
+    // Download from R2 and convert to base64 (NO Google File API)
+    const inlineAudioData: Record<string, { 
+      base64: string; 
+      mimeType: string; 
+      index: number;
+      sizeBytes: number;
+    }> = {};
 
-    // Try user's key first
-    const { data: userSecret } = await supabaseService
-      .from('user_secrets')
-      .select('encrypted_value')
-      .eq('user_id', userId)
-      .eq('secret_name', 'GEMINI_API_KEY')
-      .maybeSingle();
-
-    if (userSecret?.encrypted_value && appEncryptionKey) {
-      try {
-        apiKey = await decryptKey(userSecret.encrypted_value, appEncryptionKey);
-        isUserProvidedKey = true;
-        console.log('[speaking-upload-job] Using user-provided API key');
-      } catch (e) {
-        console.warn('[speaking-upload-job] Failed to decrypt user key:', e);
-      }
-    }
-
-    // Fall back to admin keys
-    if (!apiKey) {
-      const dbApiKeys = await getActiveGeminiKeysForModel(supabaseService, 'flash_2_5');
-      if (dbApiKeys.length > 0) {
-        apiKey = dbApiKeys[0].key_value;
-        uploadApiKeyId = dbApiKeys[0].id; // Track which admin key we're using
-        console.log(`[speaking-upload-job] Using admin API key: ${uploadApiKeyId.slice(0, 8)}...`);
-      }
-    }
-
-    if (!apiKey) {
-      throw new Error('No API keys available for upload');
-    }
-
-    // Download from R2 and upload to Google File API
-    const googleFileUris: Record<string, { fileUri: string; mimeType: string; index: number }> = {};
+    let totalSizeBytes = 0;
 
     for (let i = 0; i < orderedSegments.length; i++) {
       const segment = orderedSegments[i];
@@ -292,34 +243,37 @@ serve(async (req) => {
         continue;
       }
 
-      console.log(`[speaking-upload-job] [${i}/${orderedSegments.length}] Downloading ${segment.segmentKey}`);
+      console.log(`[speaking-upload-job] [${i + 1}/${orderedSegments.length}] Downloading ${segment.segmentKey}`);
       
       const downloadResult = await getFromR2(r2Path);
       if (!downloadResult.success || !downloadResult.bytes) {
         throw new Error(`Failed to download ${segment.segmentKey}: ${downloadResult.error}`);
       }
 
-      const ext = r2Path.split('.').pop()?.toLowerCase() || 'webm';
-      const mimeType = ext === 'mp3' ? 'audio/mpeg' : 'audio/webm';
+      const sizeBytes = downloadResult.bytes.length;
+      totalSizeBytes += sizeBytes;
 
-      console.log(`[speaking-upload-job] [${i}/${orderedSegments.length}] Uploading to Google File API`);
+      // Check size limit
+      if (totalSizeBytes > MAX_INLINE_AUDIO_SIZE_MB * 1024 * 1024) {
+        console.warn(`[speaking-upload-job] Total audio size ${(totalSizeBytes / 1024 / 1024).toFixed(1)}MB exceeds limit`);
+        // Continue anyway, Gemini will reject if too large
+      }
+
+      const mimeType = getMimeTypeFromExtension(r2Path);
       
-      const uploadResult = await uploadToGoogleFileAPI(
-        apiKey,
-        downloadResult.bytes,
-        `AUDIO_INDEX_${i}_${segment.segmentKey}.${ext}`,
-        mimeType
-      );
+      // Convert to base64
+      const base64 = btoa(String.fromCharCode(...downloadResult.bytes));
 
-      googleFileUris[segment.segmentKey] = {
-        fileUri: uploadResult.uri,
-        mimeType: uploadResult.mimeType,
+      inlineAudioData[segment.segmentKey] = {
+        base64,
+        mimeType,
         index: i,
+        sizeBytes,
       };
 
-      console.log(`[speaking-upload-job] [${i}/${orderedSegments.length}] Uploaded: ${uploadResult.uri}`);
+      console.log(`[speaking-upload-job] [${i + 1}/${orderedSegments.length}] Converted to base64: ${(sizeBytes / 1024).toFixed(1)}KB`);
 
-      // Update heartbeat after each upload
+      // Update heartbeat after each download
       await supabaseService
         .from('speaking_evaluation_jobs')
         .update({ 
@@ -336,13 +290,12 @@ serve(async (req) => {
       heartbeatInterval = null;
     }
 
-    // Save Google File URIs and the API key ID used for upload
-    // CRITICAL: upload_api_key_id must be saved so evaluate job can use the same key
+    // Save inline audio data to google_file_uris field (repurposed for inline data)
+    // This maintains compatibility with the evaluate job
     await supabaseService
       .from('speaking_evaluation_jobs')
       .update({
-        google_file_uris: googleFileUris,
-        upload_api_key_id: uploadApiKeyId, // Store the key ID (null if user-provided)
+        google_file_uris: inlineAudioData,
         upload_completed_at: new Date().toISOString(),
         status: 'pending',
         stage: 'pending_eval',
@@ -353,13 +306,10 @@ serve(async (req) => {
       })
       .eq('id', jobId)
       .eq('lock_token', lockToken);
-    
-    console.log(`[speaking-upload-job] Stored upload_api_key_id: ${uploadApiKeyId || 'user-provided'} for job ${jobId}`);
 
-    console.log(`[speaking-upload-job] Upload complete for ${jobId}, ${Object.keys(googleFileUris).length} files`);
+    console.log(`[speaking-upload-job] Upload complete: ${Object.keys(inlineAudioData).length} files, ${(totalSizeBytes / 1024 / 1024).toFixed(2)}MB total`);
 
-    // CRITICAL: Immediately trigger the evaluate job (fire-and-forget)
-    // This ensures no gap where the job sits waiting for job-runner
+    // Trigger the evaluate job
     const evaluateFunctionUrl = `${supabaseUrl}/functions/v1/speaking-evaluate-job`;
     console.log(`[speaking-upload-job] Triggering evaluate job for ${jobId}`);
     
@@ -372,10 +322,6 @@ serve(async (req) => {
       body: JSON.stringify({ jobId }),
     }).then(async (res) => {
       console.log(`[speaking-upload-job] Evaluate job trigger response: ${res.status}`);
-      if (!res.ok) {
-        const text = await res.text().catch(() => 'Unknown error');
-        console.error(`[speaking-upload-job] Evaluate job trigger failed: ${text}`);
-      }
     }).catch((err) => {
       console.error(`[speaking-upload-job] Failed to trigger evaluate job:`, err);
     });
@@ -383,7 +329,8 @@ serve(async (req) => {
     return new Response(JSON.stringify({ 
       success: true, 
       status: 'pending_eval',
-      filesUploaded: Object.keys(googleFileUris).length,
+      filesProcessed: Object.keys(inlineAudioData).length,
+      totalSizeMB: (totalSizeBytes / 1024 / 1024).toFixed(2),
       evaluateTriggered: true,
     }), {
       status: 200,
@@ -393,12 +340,10 @@ serve(async (req) => {
   } catch (error: any) {
     console.error('[speaking-upload-job] Error:', error);
 
-    // Clear heartbeat interval on error
     if (heartbeatInterval) {
       clearInterval(heartbeatInterval);
     }
 
-    // Update job with error
     if (jobId) {
       const { data: currentJob } = await supabaseService
         .from('speaking_evaluation_jobs')

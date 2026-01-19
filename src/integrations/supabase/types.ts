@@ -180,8 +180,53 @@ export type Database = {
         }
         Relationships: []
       }
+      api_key_locks: {
+        Row: {
+          cooldown_until: string | null
+          created_at: string | null
+          id: string
+          job_id: string
+          key_id: string | null
+          locked_at: string | null
+          part_number: number
+          release_at: string
+          released_at: string | null
+        }
+        Insert: {
+          cooldown_until?: string | null
+          created_at?: string | null
+          id?: string
+          job_id: string
+          key_id?: string | null
+          locked_at?: string | null
+          part_number: number
+          release_at: string
+          released_at?: string | null
+        }
+        Update: {
+          cooldown_until?: string | null
+          created_at?: string | null
+          id?: string
+          job_id?: string
+          key_id?: string | null
+          locked_at?: string | null
+          part_number?: number
+          release_at?: string
+          released_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "api_key_locks_key_id_fkey"
+            columns: ["key_id"]
+            isOneToOne: false
+            referencedRelation: "api_keys"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       api_keys: {
         Row: {
+          consecutive_429_count: number | null
           created_at: string
           error_count: number
           exp_pro_quota_exhausted: boolean | null
@@ -207,16 +252,19 @@ export type Database = {
           id: string
           is_active: boolean
           key_value: string
+          last_429_at: string | null
           locked_by_job_id: string | null
           locked_until: string | null
           pro_3_0_quota_exhausted: boolean | null
           pro_3_0_quota_exhausted_date: string | null
           provider: string
+          rate_limited_until: string | null
           tts_quota_exhausted: boolean | null
           tts_quota_exhausted_date: string | null
           updated_at: string
         }
         Insert: {
+          consecutive_429_count?: number | null
           created_at?: string
           error_count?: number
           exp_pro_quota_exhausted?: boolean | null
@@ -242,16 +290,19 @@ export type Database = {
           id?: string
           is_active?: boolean
           key_value: string
+          last_429_at?: string | null
           locked_by_job_id?: string | null
           locked_until?: string | null
           pro_3_0_quota_exhausted?: boolean | null
           pro_3_0_quota_exhausted_date?: string | null
           provider: string
+          rate_limited_until?: string | null
           tts_quota_exhausted?: boolean | null
           tts_quota_exhausted_date?: string | null
           updated_at?: string
         }
         Update: {
+          consecutive_429_count?: number | null
           created_at?: string
           error_count?: number
           exp_pro_quota_exhausted?: boolean | null
@@ -277,11 +328,13 @@ export type Database = {
           id?: string
           is_active?: boolean
           key_value?: string
+          last_429_at?: string | null
           locked_by_job_id?: string | null
           locked_until?: string | null
           pro_3_0_quota_exhausted?: boolean | null
           pro_3_0_quota_exhausted_date?: string | null
           provider?: string
+          rate_limited_until?: string | null
           tts_quota_exhausted?: boolean | null
           tts_quota_exhausted_date?: string | null
           updated_at?: string
@@ -1804,7 +1857,21 @@ export type Database = {
           key_value: string
         }[]
       }
+      checkout_key_for_part: {
+        Args: {
+          p_job_id: string
+          p_lock_duration_seconds?: number
+          p_model_name?: string
+          p_part_number: number
+        }
+        Returns: {
+          is_user_key: boolean
+          key_id: string
+          key_value: string
+        }[]
+      }
       cleanup_old_data: { Args: never; Returns: Json }
+      cleanup_old_key_locks: { Args: never; Returns: number }
       get_credit_status: { Args: { p_user_id: string }; Returns: Json }
       get_model_performance_stats: {
         Args: { p_hours?: number }
@@ -1837,16 +1904,29 @@ export type Database = {
         }
         Returns: undefined
       }
+      mark_key_rate_limited: {
+        Args: { p_cooldown_minutes?: number; p_key_id: string }
+        Returns: undefined
+      }
       refund_credits: {
         Args: { p_cost: number; p_user_id: string }
         Returns: undefined
       }
       release_api_key: { Args: { p_job_id: string }; Returns: undefined }
+      release_key_with_cooldown: {
+        Args: {
+          p_cooldown_seconds?: number
+          p_job_id: string
+          p_part_number: number
+        }
+        Returns: undefined
+      }
       reset_api_key_model_quotas: {
         Args: { p_key_id?: string }
         Returns: undefined
       }
       reset_api_key_quotas: { Args: never; Returns: undefined }
+      reset_key_rate_limit: { Args: { p_key_id: string }; Returns: undefined }
       reset_user_api_key_quotas: { Args: never; Returns: undefined }
     }
     Enums: {

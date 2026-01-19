@@ -4,46 +4,43 @@ import { GoogleGenerativeAI } from "https://esm.sh/@google/generative-ai@0.21.0"
 import { crypto } from "https://deno.land/std@0.168.0/crypto/mod.ts";
 import { 
   markModelQuotaExhausted,
-  isQuotaExhaustedError,
-  isDailyQuotaExhaustedError,
 } from "../_shared/apiKeyQuotaUtils.ts";
 import { 
   createPerformanceLogger,
 } from "../_shared/performanceLogger.ts";
 import {
-  decryptKey,
   parseJson,
-  exponentialBackoffWithJitter,
-  extractRetryAfterSeconds,
-  sleep,
   calculateBandFromCriteria,
   computeWeightedPartBand,
   corsHeaders,
-  QuotaError,
 } from "../_shared/speakingUtils.ts";
+import {
+  checkoutKeyForPart,
+  releaseKeyWithCooldown,
+  markKeyRateLimited,
+  resetKeyRateLimit,
+  classifyError,
+  interPartDelay,
+  sleep,
+  TIMINGS,
+} from "../_shared/keyPoolManager.ts";
 
 /**
- * Speaking Evaluate Job - OPTIMIZED VERSION
+ * Speaking Evaluate Job - V2 with Per-Part Key Rotation
  * 
- * Uses shared utilities from speakingUtils.ts.
- * Processes speaking evaluations in PARTS to avoid timeout.
+ * NEW ARCHITECTURE:
+ * - Uses INLINE audio bytes instead of Google File API
+ * - Separate API key for each part (1, 2, 3)
+ * - Mandatory 45s cooldown after each key use
+ * - 30s delay between parts for RPM quota reset
+ * - No retry on 429 - switch key immediately
+ * - 5-10 min cooldown for rate-limited keys
  */
 
-// =============================================================================
-// Model: ONLY gemini-2.5-flash for all speaking evaluations
-// =============================================================================
 const GEMINI_MODEL = 'gemini-2.5-flash';
 const HEARTBEAT_INTERVAL_MS = 15000;
 const LOCK_DURATION_MINUTES = 5;
-const AI_CALL_TIMEOUT_MS = 90000;
-
-// Rate limiting delays
-const BASE_RETRY_DELAY_MS = 5000;
-const MAX_RETRY_DELAY_MS = 60000;
-
-// Inter-part delay for RPM quota reset (prevents 429 errors)
-const INTER_PART_DELAY_MS = 5000;
-const KEY_SWITCH_DELAY_MS = 2000;
+const AI_CALL_TIMEOUT_MS = 120000;
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   let timer: number | null = null;
@@ -72,6 +69,8 @@ serve(async (req) => {
 
   let jobId: string | null = null;
   let heartbeatInterval: number | null = null;
+  let currentKeyId: string | null = null;
+  let currentPartNumber: number | null = null;
 
   try {
     const body = await req.json();
@@ -111,13 +110,13 @@ serve(async (req) => {
 
     if (!isClaimableStatus || !isClaimableStage || (!noLock && !lockExpired)) {
       console.log(`[speaking-evaluate-job] Job ${jobId} not claimable`);
-      return new Response(JSON.stringify({ success: false, error: 'Job already claimed or in wrong state', skipped: true }), {
+      return new Response(JSON.stringify({ success: false, error: 'Job not in claimable state', skipped: true }), {
         status: 200,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
 
-    // Claim the job - we'll set total_parts dynamically after analyzing segments
+    // Claim the job
     const { data: updatedJobs, error: claimError } = await supabaseService
       .from('speaking_evaluation_jobs')
       .update({
@@ -128,7 +127,6 @@ serve(async (req) => {
         heartbeat_at: new Date().toISOString(),
         progress: existingJob.progress || 0,
         current_part: existingJob.current_part || 0,
-        // total_parts will be updated after we analyze segments
         updated_at: new Date().toISOString(),
       })
       .eq('id', jobId)
@@ -142,13 +140,32 @@ serve(async (req) => {
     }
 
     const job = updatedJobs[0];
-    const googleFileUris = job.google_file_uris as Record<string, { fileUri: string; mimeType: string; index: number }>;
     
-    if (!googleFileUris || Object.keys(googleFileUris).length === 0) {
-      throw new Error('No Google File URIs found - upload stage incomplete');
+    // Get inline audio data (stored in google_file_uris field for compatibility)
+    const inlineAudioData = job.google_file_uris as Record<string, { 
+      base64: string; 
+      mimeType: string; 
+      index: number;
+      sizeBytes?: number;
+      // Legacy format support
+      fileUri?: string;
+    }>;
+    
+    if (!inlineAudioData || Object.keys(inlineAudioData).length === 0) {
+      throw new Error('No audio data found - upload stage incomplete');
     }
 
-    console.log(`[speaking-evaluate-job] Claimed job ${jobId}, ${Object.keys(googleFileUris).length} files ready`);
+    // Detect if this is legacy format (Google File URIs) or new format (inline base64)
+    const firstEntry = Object.values(inlineAudioData)[0];
+    const isLegacyFormat = !!firstEntry.fileUri && !firstEntry.base64;
+    
+    if (isLegacyFormat) {
+      console.log(`[speaking-evaluate-job] Detected LEGACY format (Google File URIs) - falling back to old flow`);
+      // For legacy jobs, we need to continue with the old approach
+      // This ensures backward compatibility during migration
+    }
+
+    console.log(`[speaking-evaluate-job] Claimed job ${jobId}, ${Object.keys(inlineAudioData).length} audio segments`);
 
     // Set up heartbeat
     heartbeatInterval = setInterval(async () => {
@@ -166,7 +183,7 @@ serve(async (req) => {
       }
     }, HEARTBEAT_INTERVAL_MS);
 
-    const { user_id: userId, test_id, file_paths, durations, topic, difficulty, fluency_flag, partial_results: existingPartialResults, upload_api_key_id: uploadApiKeyId } = job;
+    const { user_id: userId, test_id, file_paths, durations, topic, difficulty, fluency_flag, partial_results: existingPartialResults } = job;
     
     // Get partial results from previous run (if any)
     let partialResults = (existingPartialResults as Record<string, any>) || {};
@@ -215,11 +232,16 @@ serve(async (req) => {
     }
 
     // Group segments by part
-    const segmentsByPart: Record<number, Array<{ segmentKey: string; partNumber: 1 | 2 | 3; questionNumber: number; questionText: string }>> = {
-      1: [], 2: [], 3: []
-    };
+    const segmentsByPart: Record<number, Array<{ 
+      segmentKey: string; 
+      partNumber: 1 | 2 | 3; 
+      questionNumber: number; 
+      questionText: string;
+      base64?: string;
+      mimeType?: string;
+    }>> = { 1: [], 2: [], 3: [] };
     
-    // Extract cue card topics from old-format payloads (part1, part2, part3 objects)
+    // Extract cue card topics from old-format payloads
     const cueCardByPart: Record<number, string> = {};
     for (const partKey of ['part1', 'part2', 'part3']) {
       const partNum = Number(partKey.replace('part', ''));
@@ -229,15 +251,15 @@ serve(async (req) => {
       }
     }
     
-    for (const segmentKey of Object.keys(googleFileUris)) {
-      // Match segment keys like: part2-qp2-q1-bafadaa1 or part1-q<questionId>
+    for (const segmentKey of Object.keys(inlineAudioData)) {
       const m = String(segmentKey).match(/^part([123])\-q(.+)$/);
       if (!m) continue;
       
       const partNumber = Number(m[1]) as 1 | 2 | 3;
       const questionId = m[2];
       
-      // First try to find in the speakingParts format
+      const audioData = inlineAudioData[segmentKey];
+      
       const q = questionById.get(questionId);
       if (q) {
         segmentsByPart[q.partNumber].push({ 
@@ -245,24 +267,21 @@ serve(async (req) => {
           partNumber: q.partNumber, 
           questionNumber: q.questionNumber,
           questionText: q.questionText,
+          base64: audioData.base64,
+          mimeType: audioData.mimeType,
         });
       } else {
-        // Fallback: If no match in questionById, use the part number from the segment key itself
-        // This handles old-format presets that don't have speakingParts array
-        // Try to extract question number from the segment key (e.g., "p2-q1-bafadaa1" -> q1 = question 1)
         const qNumMatch = questionId.match(/q(\d+)/);
         const questionNumber = qNumMatch ? Number(qNumMatch[1]) : 1;
-        
-        // Use cue card as question text if available for this part
         const questionText = cueCardByPart[partNumber] || `Part ${partNumber} Question ${questionNumber}`;
-        
-        console.log(`[speaking-evaluate-job] Fallback segment mapping: ${segmentKey} -> Part ${partNumber}, Q${questionNumber}`);
         
         segmentsByPart[partNumber].push({ 
           segmentKey, 
           partNumber, 
           questionNumber,
           questionText,
+          base64: audioData.base64,
+          mimeType: audioData.mimeType,
         });
       }
     }
@@ -272,11 +291,10 @@ serve(async (req) => {
       segmentsByPart[partNum].sort((a, b) => a.questionNumber - b.questionNumber);
     }
 
-    // Calculate actual total parts (parts that have segments)
+    // Calculate actual total parts
     const actualTotalParts = [1, 2, 3].filter(p => segmentsByPart[p].length > 0).length;
-    console.log(`[speaking-evaluate-job] Actual total parts with segments: ${actualTotalParts}`);
+    console.log(`[speaking-evaluate-job] Total parts with segments: ${actualTotalParts}`);
 
-    // Update total_parts to reflect actual submitted parts
     await supabaseService
       .from('speaking_evaluation_jobs')
       .update({ 
@@ -286,98 +304,27 @@ serve(async (req) => {
       .eq('id', jobId)
       .eq('lock_token', lockToken);
 
-    // =========================================================================
-    // API KEY: Use the SAME key that uploaded the files (CRITICAL for file access)
-    // =========================================================================
-    let apiKey: string | null = null;
-    let apiKeyId: string | null = null;
-    let isUserProvidedKey = false;
-
-    // PRIORITY 1: If we have upload_api_key_id stored, use that exact key
-    // This is CRITICAL because Google File API files can only be accessed 
-    // by the same API key that uploaded them
-    if (uploadApiKeyId) {
-      console.log(`[speaking-evaluate-job] Looking up stored upload API key: ${uploadApiKeyId.slice(0, 8)}...`);
-      const { data: storedKey } = await supabaseService
-        .from('api_keys')
-        .select('id, key_value, is_active')
-        .eq('id', uploadApiKeyId)
-        .maybeSingle();
-      
-      if (storedKey?.key_value && storedKey.is_active) {
-        apiKey = storedKey.key_value;
-        apiKeyId = storedKey.id;
-        console.log(`[speaking-evaluate-job] Using stored upload API key: ${apiKeyId!.slice(0, 8)}...`);
-      } else {
-        console.warn(`[speaking-evaluate-job] Stored upload API key not found or inactive, falling back`);
-      }
-    }
-
-    // PRIORITY 2: User's key (if no stored upload key - means user's key was used for upload)
-    if (!apiKey) {
-      const { data: userSecret } = await supabaseService
-        .from('user_secrets')
-        .select('encrypted_value')
-        .eq('user_id', userId)
-        .eq('secret_name', 'GEMINI_API_KEY')
-        .maybeSingle();
-
-      if (userSecret?.encrypted_value && appEncryptionKey) {
-        try {
-          apiKey = await decryptKey(userSecret.encrypted_value, appEncryptionKey);
-          isUserProvidedKey = true;
-          console.log('[speaking-evaluate-job] Using user-provided API key');
-        } catch (e) {
-          console.warn('[speaking-evaluate-job] Failed to decrypt user key:', e);
-        }
-      }
-    }
-
-    // PRIORITY 3: Fallback to any admin key (last resort - may not work if files were uploaded with different key)
-    if (!apiKey) {
-      console.warn('[speaking-evaluate-job] No matching upload key found, falling back to any admin key (may fail due to file access)');
-      const { data: lockedKeyRows } = await supabaseService.rpc('checkout_api_key', {
-        p_job_id: jobId,
-        p_model_name: GEMINI_MODEL,
-        p_lock_minutes: 2,
-      });
-
-      if (lockedKeyRows && lockedKeyRows.length > 0) {
-        const lockedKey = lockedKeyRows[0];
-        apiKey = lockedKey.key_value;
-        apiKeyId = lockedKey.key_id;
-        console.log(`[speaking-evaluate-job] Using fallback API key via mutex: ${apiKeyId?.slice(0, 8)}...`);
-      }
-    }
-
-    if (!apiKey) {
-      throw new Error('No API key available for evaluation');
-    }
-
     // Determine which part to evaluate next
-    const currentPart = (job.current_part as number) || 0;
     const partsToEvaluate = [1, 2, 3].filter(p => {
-      // Skip parts that are already done
       if (partialResults[`part${p}`]) return false;
-      // Skip parts that have no segments
       if (segmentsByPart[p].length === 0) return false;
       return true;
     });
 
-    console.log(`[speaking-evaluate-job] Parts to evaluate: ${partsToEvaluate.join(', ')}, already done: ${Object.keys(partialResults).join(', ')}`);
+    console.log(`[speaking-evaluate-job] Parts to evaluate: ${partsToEvaluate.join(', ')}`);
 
-    // Process ONE part at a time (to avoid timeout)
+    // Process ONE part at a time
     const partToProcess = partsToEvaluate[0];
     
     if (partToProcess) {
+      currentPartNumber = partToProcess;
       const segments = segmentsByPart[partToProcess];
       console.log(`[speaking-evaluate-job] Processing Part ${partToProcess} with ${segments.length} segments`);
 
-      // Calculate progress based on actual total parts, not hardcoded 3
+      // Update progress
       const completedParts = actualTotalParts - partsToEvaluate.length;
       const progressPercent = actualTotalParts > 0 ? Math.round((completedParts / actualTotalParts) * 100) : 0;
 
-      // Update progress before starting
       await supabaseService
         .from('speaking_evaluation_jobs')
         .update({ 
@@ -388,25 +335,70 @@ serve(async (req) => {
         .eq('id', jobId)
         .eq('lock_token', lockToken);
 
-      // Build file URIs for this part
-      const partFileUris = segments.map(seg => {
-        const uri = googleFileUris[seg.segmentKey];
-        return { fileData: { mimeType: uri.mimeType, fileUri: uri.fileUri } };
+      // =====================================================================
+      // PER-PART KEY CHECKOUT
+      // =====================================================================
+      console.log(`[speaking-evaluate-job] Checking out key for Part ${partToProcess}...`);
+      
+      const keyResult = await checkoutKeyForPart(
+        supabaseService,
+        userId,
+        jobId,
+        partToProcess as 1 | 2 | 3,
+        appEncryptionKey,
+        { 
+          lockDurationSec: TIMINGS.KEY_LOCK_DURATION_SEC,
+          modelName: GEMINI_MODEL,
+        }
+      );
+
+      if (!keyResult) {
+        // No keys available - fail gracefully
+        throw new Error('All API keys are currently rate-limited or unavailable. Please try again in a few minutes.');
+      }
+
+      currentKeyId = keyResult.keyId;
+      const apiKey = keyResult.keyValue;
+      const isUserKey = keyResult.isUserKey;
+
+      console.log(`[speaking-evaluate-job] Part ${partToProcess}: Using ${isUserKey ? 'user' : 'admin'} key ${currentKeyId.slice(0, 8)}...`);
+
+      // Build inline audio parts for Gemini
+      const inlineAudioParts = segments.map(seg => {
+        if (seg.base64 && seg.mimeType) {
+          return {
+            inlineData: {
+              mimeType: seg.mimeType,
+              data: seg.base64,
+            }
+          };
+        } else if (isLegacyFormat) {
+          // Legacy format - use file URI
+          const legacyData = inlineAudioData[seg.segmentKey] as any;
+          return {
+            fileData: {
+              mimeType: legacyData.mimeType || 'audio/webm',
+              fileUri: legacyData.fileUri,
+            }
+          };
+        }
+        throw new Error(`No audio data for segment ${seg.segmentKey}`);
       });
 
-      // Build part-specific prompt
-      const partPrompt = buildPartPrompt(partToProcess as 1 | 2 | 3, segments, topic || testRow.topic, difficulty || testRow.difficulty, fluency_flag && partToProcess === 2);
+      // Build prompt
+      const partPrompt = buildPartPrompt(
+        partToProcess as 1 | 2 | 3, 
+        segments, 
+        topic || testRow.topic, 
+        difficulty || testRow.difficulty, 
+        fluency_flag && partToProcess === 2
+      );
 
-      // Evaluate this part with SINGLE model (gemini-2.5-flash only)
-      let partResult: any = null;
-      
-      // Create performance logger for this task
+      // Create performance logger
       const perfLogger = createPerformanceLogger('evaluate_speaking');
 
+      // Make the AI call
       const genAI = new GoogleGenerativeAI(apiKey);
-      console.log(`[speaking-evaluate-job] Part ${partToProcess}: using ${GEMINI_MODEL}`);
-      const callStart = Date.now();
-      
       const model = genAI.getGenerativeModel({ 
         model: GEMINI_MODEL,
         generationConfig: {
@@ -416,96 +408,97 @@ serve(async (req) => {
         },
       });
 
-      const contentParts: any[] = [...partFileUris, { text: partPrompt }];
+      const contentParts: any[] = [...inlineAudioParts, { text: partPrompt }];
+      const callStart = Date.now();
+      let partResult: any = null;
 
-      const MAX_RETRIES = 3;
-      for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-        try {
-          // Update heartbeat
-          await supabaseService
-            .from('speaking_evaluation_jobs')
-            .update({ 
-              heartbeat_at: new Date().toISOString(),
-              lock_expires_at: new Date(Date.now() + LOCK_DURATION_MINUTES * 60 * 1000).toISOString(),
-            })
-            .eq('id', jobId)
-            .eq('lock_token', lockToken);
+      try {
+        // Update heartbeat before AI call
+        await supabaseService
+          .from('speaking_evaluation_jobs')
+          .update({ 
+            heartbeat_at: new Date().toISOString(),
+            lock_expires_at: new Date(Date.now() + LOCK_DURATION_MINUTES * 60 * 1000).toISOString(),
+          })
+          .eq('id', jobId)
+          .eq('lock_token', lockToken);
 
-          const response = await withTimeout(
-            model.generateContent({ contents: [{ role: 'user', parts: contentParts }] }),
-            AI_CALL_TIMEOUT_MS,
-            `Gemini ${GEMINI_MODEL} Part ${partToProcess}`
-          );
-          const text = response.response?.text?.() || '';
-          const responseTimeMs = Date.now() - callStart;
+        const response = await withTimeout(
+          model.generateContent({ contents: [{ role: 'user', parts: contentParts }] }),
+          AI_CALL_TIMEOUT_MS,
+          `Gemini ${GEMINI_MODEL} Part ${partToProcess}`
+        );
 
-          if (!text) {
-            console.warn(`[speaking-evaluate-job] Empty response from ${GEMINI_MODEL}`);
-            await perfLogger.logError(GEMINI_MODEL, 'Empty response', responseTimeMs, apiKeyId || undefined);
-            throw new Error('Empty response from AI');
-          }
+        const text = response.response?.text?.() || '';
+        const responseTimeMs = Date.now() - callStart;
 
-          const parsed = parseJson(text);
-          if (parsed) {
-            partResult = parsed;
-            console.log(`[speaking-evaluate-job] Part ${partToProcess} success with ${GEMINI_MODEL}`);
-            await perfLogger.logSuccess(GEMINI_MODEL, responseTimeMs, apiKeyId || undefined);
-            break;
-          } else {
-            console.warn(`[speaking-evaluate-job] Failed to parse JSON from ${GEMINI_MODEL}. First 400 chars: ${text.slice(0, 400)}`);
-            await perfLogger.logError(GEMINI_MODEL, 'Failed to parse JSON', responseTimeMs, apiKeyId || undefined);
-            throw new Error('Failed to parse AI response as JSON');
-          }
-        } catch (err: any) {
-          const errMsg = String(err?.message || '');
-          const responseTimeMs = Date.now() - callStart;
-          console.error(`[speaking-evaluate-job] ${GEMINI_MODEL} failed (${attempt + 1}/${MAX_RETRIES}):`, errMsg.slice(0, 200));
-
-          // Check for PERMANENT daily quota exhaustion
-          if (isDailyQuotaExhaustedError(err)) {
-            console.log(`[speaking-evaluate-job] Daily quota exhausted for ${GEMINI_MODEL}`);
-            await perfLogger.logQuotaExceeded(GEMINI_MODEL, errMsg.slice(0, 200), apiKeyId || undefined);
-            
-            if (!isUserProvidedKey && apiKeyId) {
-              await markModelQuotaExhausted(supabaseService, apiKeyId, GEMINI_MODEL);
-            }
-            throw new Error(`Daily quota exhausted for ${GEMINI_MODEL}`);
-          }
-
-          if (isQuotaExhaustedError(errMsg)) {
-            const retryAfter = extractRetryAfterSeconds(err);
-            if (attempt < MAX_RETRIES - 1) {
-              const delay = retryAfter 
-                ? Math.min(retryAfter * 1000, MAX_RETRY_DELAY_MS) 
-                : exponentialBackoffWithJitter(attempt, BASE_RETRY_DELAY_MS, MAX_RETRY_DELAY_MS);
-              console.log(`[speaking-evaluate-job] Rate limited, retrying in ${Math.round(delay / 1000)}s...`);
-              await sleep(delay);
-              continue;
-            } else {
-              await perfLogger.logError(GEMINI_MODEL, 'Rate limit retries exhausted: ' + errMsg.slice(0, 100), responseTimeMs, apiKeyId || undefined);
-              throw new Error(`Rate limit retries exhausted for ${GEMINI_MODEL}`);
-            }
-          }
-
-          if (attempt < MAX_RETRIES - 1) {
-            const delay = exponentialBackoffWithJitter(attempt, BASE_RETRY_DELAY_MS, MAX_RETRY_DELAY_MS);
-            console.log(`[speaking-evaluate-job] Error, retrying in ${Math.round(delay / 1000)}s...`);
-            await sleep(delay);
-            continue;
-          }
-          await perfLogger.logError(GEMINI_MODEL, errMsg.slice(0, 200), responseTimeMs, apiKeyId || undefined);
-          throw new Error(`Part ${partToProcess} evaluation failed: ${errMsg.slice(0, 100)}`);
+        if (!text) {
+          throw new Error('Empty response from AI');
         }
+
+        const parsed = parseJson(text);
+        if (parsed) {
+          partResult = parsed;
+          console.log(`[speaking-evaluate-job] Part ${partToProcess} success in ${responseTimeMs}ms`);
+          await perfLogger.logSuccess(GEMINI_MODEL, responseTimeMs, currentKeyId !== 'user' ? currentKeyId : undefined);
+          
+          // Reset rate limit counter on success
+          if (!isUserKey && currentKeyId) {
+            await resetKeyRateLimit(supabaseService, currentKeyId);
+          }
+        } else {
+          throw new Error('Failed to parse AI response as JSON');
+        }
+
+      } catch (err: any) {
+        const errMsg = String(err?.message || '');
+        const responseTimeMs = Date.now() - callStart;
+        console.error(`[speaking-evaluate-job] Part ${partToProcess} error:`, errMsg.slice(0, 200));
+
+        // Classify the error
+        const errorClass = classifyError(err);
+        console.log(`[speaking-evaluate-job] Error classification: ${errorClass.type} - ${errorClass.description}`);
+
+        // Handle based on error type
+        if (errorClass.type === 'rate_limit') {
+          // Mark key as rate-limited (NO RETRY)
+          if (!isUserKey && currentKeyId) {
+            await markKeyRateLimited(supabaseService, currentKeyId, errorClass.cooldownMinutes);
+          }
+          await perfLogger.logError(GEMINI_MODEL, `Rate limit: ${errMsg.slice(0, 100)}`, responseTimeMs, currentKeyId !== 'user' ? currentKeyId : undefined);
+          
+          // Release the lock and re-queue for retry with different key
+          await releaseKeyWithCooldown(supabaseService, jobId, partToProcess as 1 | 2 | 3, 0);
+          
+          throw new Error(`Rate limit hit. Key ${currentKeyId?.slice(0, 8)}... marked for cooldown. Will retry with different key.`);
+        }
+
+        if (errorClass.type === 'daily_quota') {
+          // Mark key as exhausted for the day
+          if (!isUserKey && currentKeyId) {
+            await markModelQuotaExhausted(supabaseService, currentKeyId, GEMINI_MODEL);
+          }
+          await perfLogger.logQuotaExceeded(GEMINI_MODEL, errMsg.slice(0, 100), currentKeyId !== 'user' ? currentKeyId : undefined);
+          
+          throw new Error(`Daily quota exhausted for key ${currentKeyId?.slice(0, 8)}...`);
+        }
+
+        // For other errors, just fail
+        await perfLogger.logError(GEMINI_MODEL, errMsg.slice(0, 200), responseTimeMs, currentKeyId !== 'user' ? currentKeyId : undefined);
+        throw new Error(`Part ${partToProcess} evaluation failed: ${errMsg.slice(0, 100)}`);
       }
 
-      if (!partResult) {
-        throw new Error(`Part ${partToProcess} evaluation failed: no result after retries`);
-      }
+      // =====================================================================
+      // RELEASE KEY WITH COOLDOWN
+      // =====================================================================
+      console.log(`[speaking-evaluate-job] Releasing key with ${TIMINGS.KEY_COOLDOWN_SEC}s cooldown...`);
+      await releaseKeyWithCooldown(supabaseService, jobId, partToProcess as 1 | 2 | 3, TIMINGS.KEY_COOLDOWN_SEC);
+      currentKeyId = null;
 
       // Save partial result
       partialResults[`part${partToProcess}`] = partResult;
       
-      const newProgress = Math.round(((3 - partsToEvaluate.length + 1) / 3) * 100);
+      const newProgress = Math.round(((actualTotalParts - partsToEvaluate.length + 1) / actualTotalParts) * 100);
       
       await supabaseService
         .from('speaking_evaluation_jobs')
@@ -527,17 +520,6 @@ serve(async (req) => {
       heartbeatInterval = null;
     }
 
-    // Release API key mutex after completing this part (only if we used mutex checkout)
-    // Note: With the new upload_api_key_id tracking, mutex is only used as fallback
-    await supabaseService.rpc('release_api_key', { p_job_id: jobId });
-
-    // CRITICAL: Add 5-second delay between part evaluations for RPM quota reset
-    // This prevents 429 "Too Many Requests" errors when evaluating multiple parts
-    if (partToProcess && partsToEvaluate.length > 1) {
-      console.log(`[speaking-evaluate-job] Rate limit cooldown: waiting ${INTER_PART_DELAY_MS / 1000}s before next part...`);
-      await sleep(INTER_PART_DELAY_MS);
-    }
-
     // Check if all parts are done
     const remainingParts = [1, 2, 3].filter(p => {
       if (partialResults[`part${p}`]) return false;
@@ -546,8 +528,13 @@ serve(async (req) => {
     });
 
     if (remainingParts.length > 0) {
-      // More parts to process - release lock and let job runner pick it up again
-      console.log(`[speaking-evaluate-job] ${remainingParts.length} parts remaining, releasing for next iteration`);
+      // More parts to process - apply inter-part delay then trigger next iteration
+      console.log(`[speaking-evaluate-job] ${remainingParts.length} parts remaining`);
+      
+      // Apply mandatory inter-part delay for RPM quota reset
+      if (currentPartNumber) {
+        await interPartDelay(currentPartNumber);
+      }
       
       await supabaseService
         .from('speaking_evaluation_jobs')
@@ -561,7 +548,7 @@ serve(async (req) => {
         })
         .eq('id', jobId);
 
-      // Immediately trigger next iteration
+      // Trigger next iteration
       const functionUrl = `${supabaseUrl}/functions/v1/speaking-evaluate-job`;
       fetch(functionUrl, {
         method: 'POST',
@@ -575,7 +562,7 @@ serve(async (req) => {
       return new Response(JSON.stringify({ 
         success: true, 
         status: 'partial',
-        progress: Math.round(((3 - remainingParts.length) / 3) * 100),
+        progress: Math.round(((actualTotalParts - remainingParts.length) / actualTotalParts) * 100),
         remainingParts,
       }), {
         status: 200,
@@ -640,8 +627,7 @@ serve(async (req) => {
       })
       .eq('id', jobId);
 
-    // CLEANUP: Cancel all other pending/processing jobs for the same test
-    // This prevents stale jobs from showing in the UI after successful completion
+    // Cleanup stale jobs for same test
     const { data: staleJobs } = await supabaseService
       .from('speaking_evaluation_jobs')
       .select('id')
@@ -651,7 +637,7 @@ serve(async (req) => {
       .in('status', ['pending', 'processing']);
 
     if (staleJobs && staleJobs.length > 0) {
-      console.log(`[speaking-evaluate-job] Cancelling ${staleJobs.length} stale jobs for test ${test_id}`);
+      console.log(`[speaking-evaluate-job] Cancelling ${staleJobs.length} stale jobs`);
       await supabaseService
         .from('speaking_evaluation_jobs')
         .update({
@@ -687,13 +673,13 @@ serve(async (req) => {
       clearInterval(heartbeatInterval);
     }
 
-    // Release API key mutex on error
-    if (jobId) {
+    // Release key if we have one checked out
+    if (currentKeyId && currentPartNumber && jobId) {
       try {
-        await supabaseService.rpc('release_api_key', { p_job_id: jobId });
-        console.log(`[speaking-evaluate-job] Mutex: Released API key on error for job ${jobId}`);
+        await releaseKeyWithCooldown(supabaseService, jobId, currentPartNumber as 1 | 2 | 3, 0);
+        console.log(`[speaking-evaluate-job] Released key on error`);
       } catch (releaseErr) {
-        console.warn('[speaking-evaluate-job] Failed to release API key mutex:', releaseErr);
+        console.warn('[speaking-evaluate-job] Failed to release key:', releaseErr);
       }
     }
 
@@ -870,7 +856,6 @@ function aggregatePartResults(
   const part2 = partialResults.part2 || {};
   const part3 = partialResults.part3 || {};
 
-  // Aggregate criteria scores (average across parts that have them)
   const aggregateCriteria = (criterion: string) => {
     const scores: number[] = [];
     const feedbacks: string[] = [];
@@ -907,7 +892,6 @@ function aggregatePartResults(
     pronunciation: aggregateCriteria('pronunciation'),
   };
 
-  // Aggregate transcripts
   const transcripts_by_part: Record<string, string> = {};
   const transcripts_by_question: Record<string, any[]> = { '1': [], '2': [], '3': [] };
   
@@ -919,7 +903,6 @@ function aggregatePartResults(
     }
   }
 
-  // Aggregate model answers
   const modelAnswers: any[] = [];
   for (const part of [part1, part2, part3]) {
     if (Array.isArray(part?.modelAnswers)) {
@@ -927,7 +910,6 @@ function aggregatePartResults(
     }
   }
 
-  // Aggregate lexical upgrades
   const lexical_upgrades: any[] = [];
   for (const part of [part1, part2, part3]) {
     if (Array.isArray(part?.lexical_upgrades)) {
@@ -935,19 +917,16 @@ function aggregatePartResults(
     }
   }
 
-  // Build summary
   const partSummaries: string[] = [];
   if (part1.part_summary) partSummaries.push(`Part 1: ${part1.part_summary}`);
   if (part2.part_summary) partSummaries.push(`Part 2: ${part2.part_summary}`);
   if (part3.part_summary) partSummaries.push(`Part 3: ${part3.part_summary}`);
 
-  // Calculate part_scores from per-part bands
   const part_scores: { part1?: number; part2?: number; part3?: number } = {};
   if (typeof part1.part_band === 'number') part_scores.part1 = part1.part_band;
   if (typeof part2.part_band === 'number') part_scores.part2 = part2.part_band;
   if (typeof part3.part_band === 'number') part_scores.part3 = part3.part_band;
 
-  // Calculate overall band using weighted part scores first, fall back to criteria average
   const weightedBand = computeWeightedPartBand(part_scores);
   const criteriaScores = [
     criteria.fluency_coherence.band,

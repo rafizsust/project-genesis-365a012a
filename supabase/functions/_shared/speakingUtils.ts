@@ -36,12 +36,14 @@ export async function decryptKey(encrypted: string, appKey: string): Promise<str
 }
 
 // ============================================================================
-// GOOGLE FILE API UTILITIES
+// GOOGLE FILE API UTILITIES (DEPRECATED - Use inline audio instead)
 // ============================================================================
 
 /**
  * Upload audio to Google File API using direct HTTP (Deno-compatible)
  * Returns file URI for use in Gemini API calls
+ * 
+ * @deprecated Use buildInlineAudioPart() instead for better reliability
  */
 export async function uploadToGoogleFileAPI(
   apiKey: string,
@@ -104,6 +106,61 @@ export async function uploadToGoogleFileAPI(
     uri: result.file.uri,
     mimeType: result.file.mimeType || mimeType,
   };
+}
+
+// ============================================================================
+// INLINE AUDIO UTILITIES (PREFERRED)
+// ============================================================================
+
+/**
+ * Build an inline audio part for Gemini API calls.
+ * This eliminates the need for Google File API and provides better reliability.
+ * 
+ * @param audioBytes - The raw audio bytes
+ * @param mimeType - The MIME type (e.g., 'audio/webm', 'audio/mpeg')
+ * @returns Object suitable for Gemini content parts
+ */
+export function buildInlineAudioPart(
+  audioBytes: Uint8Array,
+  mimeType: string
+): { inlineData: { mimeType: string; data: string } } {
+  // Convert to base64
+  const base64 = btoa(String.fromCharCode(...audioBytes));
+  
+  return {
+    inlineData: {
+      mimeType,
+      data: base64,
+    },
+  };
+}
+
+/**
+ * Build inline audio parts for multiple segments.
+ * Returns array ready to be spread into Gemini content parts.
+ */
+export function buildInlineAudioParts(
+  segments: Array<{ audioBytes: Uint8Array; mimeType: string }>
+): Array<{ inlineData: { mimeType: string; data: string } }> {
+  return segments.map(seg => buildInlineAudioPart(seg.audioBytes, seg.mimeType));
+}
+
+/**
+ * Determine MIME type from file extension
+ */
+export function getMimeTypeFromExtension(filePath: string): string {
+  const ext = filePath.split('.').pop()?.toLowerCase() || 'webm';
+  switch (ext) {
+    case 'mp3':
+      return 'audio/mpeg';
+    case 'wav':
+      return 'audio/wav';
+    case 'ogg':
+      return 'audio/ogg';
+    case 'webm':
+    default:
+      return 'audio/webm';
+  }
 }
 
 // ============================================================================
