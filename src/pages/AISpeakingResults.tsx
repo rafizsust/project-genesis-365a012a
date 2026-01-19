@@ -14,8 +14,7 @@ import { useSpeakingEvaluationRealtime } from '@/hooks/useSpeakingEvaluationReal
 import { AddToFlashcardButton } from '@/components/common/AddToFlashcardButton';
 import { InlineProgressBanner } from '@/components/common/InlineProgressBanner';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { SpeakingResultsSkeleton, ProcessingCardSkeleton } from '@/components/speaking/SpeakingResultsSkeleton';
-import {
+import { SpeakingResultsSkeleton } from '@/components/speaking/SpeakingResultsSkeleton';
   Mic,
   RotateCcw,
   Home,
@@ -577,33 +576,15 @@ export default function AISpeakingResults() {
   const isBootstrappingJob =
     !result && !isWaiting && !isFailed && jobStatus === null && Date.now() - mountedAtRef.current < 4000;
 
-  // NEW LOGIC: Only show full skeleton for truly new tests (no previous result)
-  // For re-evaluations (when previous result exists), show the result with inline progress banner
-  const showFullProcessingSkeleton = !result && (isWaiting || isBootstrappingJob);
-  
+  // If there's no result yet (fresh submission), we don't keep users waiting on this page.
+  // History already shows the live progress UI.
+  if (!result && (isWaiting || isBootstrappingJob)) {
+    navigate('/ai-practice/history', { replace: true });
+    return null;
+  }
+
   // Show inline re-evaluation banner when we have a previous result but a new job is running
   const showReEvaluationBanner = result && isWaiting && hasNewerJobThanResult;
-
-  if (showFullProcessingSkeleton) {
-    return (
-      <div className="min-h-screen flex flex-col bg-background">
-        <Navbar />
-        <main className="flex-1 flex items-center justify-center p-4">
-          <ProcessingCardSkeleton
-            stage={jobStatus === 'processing' ? 'processing' : 'queued'}
-            progress={progress}
-            currentPart={currentPart}
-            totalParts={totalParts}
-            retryCount={retryCount}
-            jobStage={jobStage}
-            jobCreatedAt={latestJobUpdatedAt || undefined}
-            onCancel={latestJobId ? cancelJob : undefined}
-            isCancelling={isCancelling}
-          />
-        </main>
-      </div>
-    );
-  }
 
   if (isFailed) {
 

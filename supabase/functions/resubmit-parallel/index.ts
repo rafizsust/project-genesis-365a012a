@@ -327,104 +327,45 @@ serve(async (req) => {
     console.log(`[resubmit-parallel] Re-queuing evaluation via evaluate-speaking-async (mode=${resubmitMode})`);
 
     // IMPORTANT:
-    // Basic mode is *text-based* only when transcripts are provided. When resubmitting from History,
-    // we reconstruct per-question transcripts from the previous evaluation_report (modelAnswers[].candidateResponse)
-    // so "Accuracy → Basic" resubmits stay truly text-based.
+    // Basic mode is *text-based* and must only use the user's saved browser transcripts.
+    // We NEVER derive transcripts from model answers.
     let reconstructedTranscripts: Record<string, any> | undefined;
 
     if (resubmitMode === 'basic') {
-      console.log(`[resubmit-parallel] BASIC MODE: Attempting to reconstruct transcripts for text-based evaluation`);
-      
-      try {
-        let modelAnswers: any[] = [];
-        let transcriptSource = 'none';
-        
-        // Source 1: Try speaking_submissions.evaluation_report
-        const { data: lastSubmission } = await supabaseService
-          .from('speaking_submissions')
-          .select('evaluation_report')
-          .eq('test_id', testId)
-          .eq('user_id', user.id)
-          .order('submitted_at', { ascending: false })
-          .limit(1)
-          .maybeSingle();
+      console.log(`[resubmit-parallel] BASIC MODE: Looking for saved browser transcripts from last result`);
 
-        const report = lastSubmission?.evaluation_report as any;
-        if (Array.isArray(report?.modelAnswers) && report.modelAnswers.length > 0) {
-          modelAnswers = report.modelAnswers;
-          transcriptSource = 'speaking_submissions.evaluation_report';
-          console.log(`[resubmit-parallel] BASIC MODE: Found ${modelAnswers.length} modelAnswers from speaking_submissions`);
-        }
-        
-        // Source 2: Fallback to ai_practice_results.question_results (where final transcripts are stored after evaluation)
-        if (modelAnswers.length === 0) {
-          console.log(`[resubmit-parallel] BASIC MODE: Trying ai_practice_results fallback...`);
-          const { data: lastResult } = await supabaseService
-            .from('ai_practice_results')
-            .select('answers, question_results')
-            .eq('test_id', testId)
-            .eq('user_id', user.id)
-            .eq('module', 'speaking')
-            .order('completed_at', { ascending: false })
-            .limit(1)
-            .maybeSingle();
-          
-          if (lastResult) {
-            // Try question_results (normalized evaluation report)
-            const questionResults = lastResult.question_results as any;
-            if (Array.isArray(questionResults?.modelAnswers) && questionResults.modelAnswers.length > 0) {
-              modelAnswers = questionResults.modelAnswers;
-              transcriptSource = 'ai_practice_results.question_results.modelAnswers';
-              console.log(`[resubmit-parallel] BASIC MODE: Found ${modelAnswers.length} modelAnswers from ai_practice_results.question_results`);
-            }
-          }
-        }
+      const { data: lastResult, error: lastResultErr } = await supabaseService
+        .from('ai_practice_results')
+        .select('answers')
+        .eq('test_id', testId)
+        .eq('user_id', user.id)
+        .eq('module', 'speaking')
+        .order('completed_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
 
-        const transcriptsFromReport: Record<string, any> = {};
-        for (const a of modelAnswers) {
-          const segKey = String(a?.segment_key || a?.segmentKey || '');
-          const candidateResponse = String(a?.candidateResponse || a?.candidate_response || a?.transcript || '').trim();
-          
-          // Skip if no segment key or no actual response
-          if (!segKey) {
-            console.log(`[resubmit-parallel] BASIC MODE: Skipping modelAnswer - no segment_key`);
-            continue;
-          }
-          if (!candidateResponse || candidateResponse === '[NO SPEECH]' || candidateResponse === '[INAUDIBLE]') {
-            console.log(`[resubmit-parallel] BASIC MODE: Skipping segment ${segKey} - empty/inaudible response`);
-            continue;
-          }
+      if (lastResultErr) {
+        console.warn('[resubmit-parallel] BASIC MODE: Failed to fetch last result:', lastResultErr);
+      }
 
-          transcriptsFromReport[segKey] = {
-            rawTranscript: candidateResponse,
-            cleanedTranscript: candidateResponse,
-            durationMs: Math.round((durations?.[segKey] || 0) * 1000),
-            fluencyMetrics: {
-              wordsPerMinute: 0,
-              pauseCount: 0,
-              fillerCount: 0,
-              fillerRatio: 0,
-              repetitionCount: 0,
-              overallFluencyScore: 0,
-            },
-            prosodyMetrics: {
-              pitchVariation: 0,
-              stressEventCount: 0,
-              rhythmConsistency: 0,
-            },
-            overallClarityScore: 0,
-            wordConfidences: [],
-          };
-        }
+      const answers = lastResult?.answers as any;
+      const saved = answers && typeof answers === 'object' ? (answers as any).transcripts : undefined;
 
-        if (Object.keys(transcriptsFromReport).length > 0) {
-          reconstructedTranscripts = transcriptsFromReport;
-          console.log(`[resubmit-parallel] BASIC MODE: Successfully reconstructed ${Object.keys(transcriptsFromReport).length} transcripts from ${transcriptSource}`);
-        } else {
-          console.warn(`[resubmit-parallel] BASIC MODE: No valid transcripts found from any source. Mode will be forced to 'accuracy' (audio-based).`);
-        }
-      } catch (e) {
-        console.warn('[resubmit-parallel] BASIC MODE: Failed to reconstruct transcripts:', e);
+      if (saved && typeof saved === 'object' && Object.keys(saved).length > 0) {
+        reconstructedTranscripts = saved;
+        console.log(`[resubmit-parallel] BASIC MODE: Found saved transcripts for ${Object.keys(saved).length} segments`);
+      } else {
+        return new Response(
+          JSON.stringify({
+            error:
+              'Cannot re-evaluate in Basic mode because no saved browser transcripts exist for this test. Use Accuracy mode (audio-based) instead.',
+            code: 'NO_BROWSER_TRANSCRIPTS',
+          }),
+          {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          },
+        );
       }
     }
 

@@ -566,7 +566,6 @@ export default function AIPracticeHistory() {
   const [cancellingJobId, setCancellingJobId] = useState<string | null>(null);
   const [parallelResubmitting, setParallelResubmitting] = useState<string | null>(null);
   const [confirmResubmitTestId, setConfirmResubmitTestId] = useState<string | null>(null);
-  const [resubmitEvaluationMode, setResubmitEvaluationMode] = useState<'basic' | 'accuracy'>('accuracy');
 
 
   const handleCancelEvaluation = async (testId: string) => {
@@ -657,8 +656,18 @@ export default function AIPracticeHistory() {
   };
 
   // Handle resubmit (uses stored R2 audio, single API call)
-  const handleResubmit = async (testId: string, evaluationMode: 'basic' | 'accuracy') => {
+  // Resubmits in the SAME mode as the last successful evaluation for this test:
+  // - If we have saved browser transcripts -> basic
+  // - Otherwise -> accuracy (audio-based)
+  const handleResubmit = async (testId: string) => {
     setParallelResubmitting(testId);
+
+    const inferMode = (): 'basic' | 'accuracy' => {
+      const r = testResultsRef.current[testId] || (testResults as any)[testId];
+      const answers = r?.answers as any;
+      const saved = answers && typeof answers === 'object' ? (answers as any).transcripts : undefined;
+      return saved && typeof saved === 'object' && Object.keys(saved).length > 0 ? 'basic' : 'accuracy';
+    };
 
     try {
       const { data: { session } } = await supabase.auth.getSession();
@@ -666,6 +675,8 @@ export default function AIPracticeHistory() {
         toast({ title: 'Error', description: 'Please log in to resubmit', variant: 'destructive' });
         return;
       }
+
+      const evaluationMode = inferMode();
 
       const response = await supabase.functions.invoke('resubmit-parallel', {
         body: { testId, evaluationMode },
@@ -676,7 +687,7 @@ export default function AIPracticeHistory() {
       }
 
       const data = response.data;
-      
+
       // The resubmit-parallel function queues the job asynchronously.
       // Stay on History and show progress in the card (no redirect).
       if (data?.queued || data?.success) {
@@ -848,28 +859,16 @@ export default function AIPracticeHistory() {
             <AlertDialogTitle>Re-evaluate this speaking test?</AlertDialogTitle>
             <AlertDialogDescription>
               This will overwrite your previous score/report for this test with a new evaluation.
+              The re-evaluation will use the same mode as your last successful evaluation for this test.
             </AlertDialogDescription>
           </AlertDialogHeader>
-
-          <div className="mt-3">
-            <div className="text-sm font-medium text-foreground mb-2">Evaluation type</div>
-            <Tabs value={resubmitEvaluationMode} onValueChange={(v) => setResubmitEvaluationMode(v as 'basic' | 'accuracy')}>
-              <TabsList className="grid grid-cols-2 w-full">
-                <TabsTrigger value="basic">Basic</TabsTrigger>
-                <TabsTrigger value="accuracy">Accuracy</TabsTrigger>
-              </TabsList>
-            </Tabs>
-            <p className="mt-2 text-xs text-muted-foreground">
-              Basic is faster/cheaper; Accuracy uses audio-based evaluation for best scoring precision.
-            </p>
-          </div>
 
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
                 if (!confirmResubmitTestId) return;
-                void handleResubmit(confirmResubmitTestId, resubmitEvaluationMode);
+                void handleResubmit(confirmResubmitTestId);
                 setConfirmResubmitTestId(null);
               }}
             >
