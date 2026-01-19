@@ -12,6 +12,7 @@ import { supabase } from '@/integrations/supabase/client';
 import { toast } from 'sonner';
 import { useSpeakingEvaluationRealtime } from '@/hooks/useSpeakingEvaluationRealtime';
 import { AddToFlashcardButton } from '@/components/common/AddToFlashcardButton';
+import { InlineProgressBanner } from '@/components/common/InlineProgressBanner';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { SpeakingResultsSkeleton, ProcessingCardSkeleton } from '@/components/speaking/SpeakingResultsSkeleton';
 import {
@@ -566,8 +567,7 @@ export default function AISpeakingResults() {
   }
 
   // Async processing state
-  // 1) If there's no result yet and the job is pending/processing
-  // 2) OR if there IS a previous result, but a NEW job has started (retake/resubmit) — show live progress instead of stale score.
+  // Determine if a newer job is running than the last result we have
   const hasNewerJobThanResult = Boolean(
     result?.created_at &&
       latestJobUpdatedAt &&
@@ -577,7 +577,14 @@ export default function AISpeakingResults() {
   const isBootstrappingJob =
     !result && !isWaiting && !isFailed && jobStatus === null && Date.now() - mountedAtRef.current < 4000;
 
-  if ((!result && isWaiting) || (result && isWaiting && hasNewerJobThanResult) || isBootstrappingJob) {
+  // NEW LOGIC: Only show full skeleton for truly new tests (no previous result)
+  // For re-evaluations (when previous result exists), show the result with inline progress banner
+  const showFullProcessingSkeleton = !result && (isWaiting || isBootstrappingJob);
+  
+  // Show inline re-evaluation banner when we have a previous result but a new job is running
+  const showReEvaluationBanner = result && isWaiting && hasNewerJobThanResult;
+
+  if (showFullProcessingSkeleton) {
     return (
       <div className="min-h-screen flex flex-col bg-background">
         <Navbar />
@@ -737,6 +744,20 @@ export default function AISpeakingResults() {
       
       <main className="flex-1 py-4 md:py-8">
         <div className="container max-w-5xl mx-auto px-3 md:px-4">
+          {/* Re-evaluation Progress Banner - shown when viewing previous results while new evaluation is processing */}
+          {showReEvaluationBanner && (
+            <div className="mb-4">
+              <InlineProgressBanner
+                stage={jobStage || 'processing'}
+                currentPart={currentPart}
+                totalParts={totalParts}
+                progress={progress}
+                onCancel={latestJobId ? cancelJob : undefined}
+                isCancelling={isCancelling}
+              />
+            </div>
+          )}
+          
           {/* Header */}
           <div className="text-center mb-6 md:mb-8">
             <div className="inline-flex items-center gap-2 px-3 md:px-4 py-1.5 md:py-2 rounded-full bg-primary/10 text-primary mb-3 md:mb-4">
