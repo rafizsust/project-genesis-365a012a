@@ -900,13 +900,13 @@ export default function AISpeakingResults() {
                 <CardContent className="space-y-6">
                   {(() => {
                     // Build a unified list of all questions with audio, transcripts, and model answers
-                    const allAudioUrls = Object.entries(result.audio_urls);
+                    const allAudioUrls = Object.entries(result.audio_urls || {});
                     const modelAnswers = report.modelAnswers || [];
                     
                     // Group by part number based on segment key patterns
                     const questionsByPart: Map<number, Array<{
                       key: string;
-                      audioUrl: string;
+                      audioUrl?: string;
                       questionNumber: number;
                       questionText: string;
                       transcript: string;
@@ -977,6 +977,29 @@ export default function AISpeakingResults() {
                         modelAnswer: matchingModel,
                       });
                     });
+                    
+                    // FALLBACK FOR TEXT-BASED EVALUATION: If no audio URLs but we have model answers, 
+                    // populate from model answers instead
+                    if (allAudioUrls.length === 0 && modelAnswers.length > 0) {
+                      modelAnswers.forEach((ma, idx) => {
+                        const partNum = ma.partNumber || 1;
+                        const questionNum = ma.questionNumber || idx + 1;
+                        const key = ma.segment_key || `part${partNum}-q${questionNum}`;
+                        
+                        if (!questionsByPart.has(partNum)) {
+                          questionsByPart.set(partNum, []);
+                        }
+                        
+                        questionsByPart.get(partNum)!.push({
+                          key,
+                          audioUrl: undefined, // No audio for text-based
+                          questionNumber: questionNum,
+                          questionText: ma.question || `Question ${questionNum}`,
+                          transcript: ma.candidateResponse || '',
+                          modelAnswer: ma,
+                        });
+                      });
+                    }
 
                     // Sort questions within each part
                     questionsByPart.forEach((questions) => {
@@ -989,7 +1012,7 @@ export default function AISpeakingResults() {
                     if (sortedParts.length === 0) {
                       return (
                         <p className="text-muted-foreground text-center py-8">
-                          No recordings available for this test.
+                          No responses available for this test. This may happen if the evaluation is still processing.
                         </p>
                       );
                     }
@@ -1018,30 +1041,36 @@ export default function AISpeakingResults() {
                                   <p className="text-sm font-medium">{q.questionText}</p>
                                 </div>
                                 
-                                {/* Audio Player */}
-                                <div>
-                                  <p className="text-xs text-muted-foreground mb-2 flex items-center gap-1">
-                                    <Volume2 className="w-3 h-3" />
-                                    Your Recording
-                                  </p>
-                                  <audio 
-                                    controls 
-                                    className="w-full h-8 [&::-webkit-media-controls-panel]:h-8"
-                                    src={q.audioUrl}
-                                    preload="metadata"
-                                    crossOrigin="anonymous"
-                                  >
-                                    Your browser does not support audio playback.
-                                  </audio>
-                                </div>
+                                {/* Audio Player - only show if audio URL exists */}
+                                {q.audioUrl && (
+                                  <div>
+                                    <p className="text-xs text-muted-foreground mb-2 flex items-center gap-1">
+                                      <Volume2 className="w-3 h-3" />
+                                      Your Recording
+                                    </p>
+                                    <audio 
+                                      controls 
+                                      className="w-full h-8 [&::-webkit-media-controls-panel]:h-8"
+                                      src={q.audioUrl}
+                                      preload="metadata"
+                                      crossOrigin="anonymous"
+                                    >
+                                      Your browser does not support audio playback.
+                                    </audio>
+                                  </div>
+                                )}
                                 
-                                {/* Transcript */}
+                                {/* Transcript / Your Response */}
                                 <div className="pl-3 border-l-2 border-muted">
-                                  <p className="text-xs text-muted-foreground mb-1">Your Transcript:</p>
+                                  <p className="text-xs text-muted-foreground mb-1">
+                                    {q.audioUrl ? 'Your Transcript:' : 'Your Response:'}
+                                  </p>
                                   <p className="text-sm text-muted-foreground whitespace-pre-line">
                                     {q.transcript || (
                                       <span className="italic text-muted-foreground/70">
-                                        (Transcript unavailable - listen to the recording above)
+                                        {q.audioUrl 
+                                          ? '(Transcript unavailable - listen to the recording above)'
+                                          : '(Response not available)'}
                                       </span>
                                     )}
                                   </p>
