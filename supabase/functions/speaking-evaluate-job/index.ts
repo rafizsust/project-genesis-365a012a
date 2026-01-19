@@ -3,7 +3,6 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { GoogleGenerativeAI } from "https://esm.sh/@google/generative-ai@0.21.0";
 import { crypto } from "https://deno.land/std@0.168.0/crypto/mod.ts";
 import { 
-  getActiveGeminiKeysForModels, 
   markModelQuotaExhausted,
   isQuotaExhaustedError,
   isDailyQuotaExhaustedError,
@@ -31,12 +30,9 @@ import {
  */
 
 // =============================================================================
-// Model Priority: gemini-2.5-flash as primary for all speaking evaluations
+// Model: ONLY gemini-2.5-flash for all speaking evaluations
 // =============================================================================
-const GEMINI_MODELS = [
-  'gemini-2.5-flash',                    // 1. Primary: Best for speaking evaluation
-  'gemini-2.0-flash',                    // 2. Backup: Stable audio model
-];
+const GEMINI_MODEL = 'gemini-2.5-flash';
 const HEARTBEAT_INTERVAL_MS = 15000;
 const LOCK_DURATION_MINUTES = 5;
 const AI_CALL_TIMEOUT_MS = 90000;
@@ -170,7 +166,7 @@ serve(async (req) => {
       }
     }, HEARTBEAT_INTERVAL_MS);
 
-    const { user_id: userId, test_id, file_paths, durations, topic, difficulty, fluency_flag, partial_results: existingPartialResults } = job;
+    const { user_id: userId, test_id, file_paths, durations, topic, difficulty, fluency_flag, partial_results: existingPartialResults, upload_api_key_id: uploadApiKeyId } = job;
     
     // Get partial results from previous run (if any)
     let partialResults = (existingPartialResults as Record<string, any>) || {};
@@ -291,53 +287,72 @@ serve(async (req) => {
       .eq('lock_token', lockToken);
 
     // =========================================================================
-    // API KEY MUTEX: Checkout a locked API key for this job
+    // API KEY: Use the SAME key that uploaded the files (CRITICAL for file access)
     // =========================================================================
-    interface KeyCandidate { key: string; keyId: string | null; isUserProvided: boolean; }
-    const keyQueue: KeyCandidate[] = [];
-    let mutexKeyId: string | null = null; // Track locked key for cleanup
+    let apiKey: string | null = null;
+    let apiKeyId: string | null = null;
+    let isUserProvidedKey = false;
 
-    // User's key first (not subject to mutex)
-    const { data: userSecret } = await supabaseService
-      .from('user_secrets')
-      .select('encrypted_value')
-      .eq('user_id', userId)
-      .eq('secret_name', 'GEMINI_API_KEY')
-      .maybeSingle();
-
-    if (userSecret?.encrypted_value && appEncryptionKey) {
-      try {
-        const userKey = await decryptKey(userSecret.encrypted_value, appEncryptionKey);
-        keyQueue.push({ key: userKey, keyId: null, isUserProvided: true });
-      } catch (e) {
-        console.warn('[speaking-evaluate-job] Failed to decrypt user key:', e);
+    // PRIORITY 1: If we have upload_api_key_id stored, use that exact key
+    // This is CRITICAL because Google File API files can only be accessed 
+    // by the same API key that uploaded them
+    if (uploadApiKeyId) {
+      console.log(`[speaking-evaluate-job] Looking up stored upload API key: ${uploadApiKeyId.slice(0, 8)}...`);
+      const { data: storedKey } = await supabaseService
+        .from('api_keys')
+        .select('id, key_value, is_active')
+        .eq('id', uploadApiKeyId)
+        .maybeSingle();
+      
+      if (storedKey?.key_value && storedKey.is_active) {
+        apiKey = storedKey.key_value;
+        apiKeyId = storedKey.id;
+        console.log(`[speaking-evaluate-job] Using stored upload API key: ${apiKeyId!.slice(0, 8)}...`);
+      } else {
+        console.warn(`[speaking-evaluate-job] Stored upload API key not found or inactive, falling back`);
       }
     }
 
-    // Try to checkout (lock) an admin API key using database mutex
-    // This prevents multiple concurrent jobs from hitting the same key
-    const { data: lockedKeyRows } = await supabaseService.rpc('checkout_api_key', {
-      p_job_id: jobId,
-      p_model_name: GEMINI_MODELS[0], // Primary model
-      p_lock_minutes: 2,
-    });
+    // PRIORITY 2: User's key (if no stored upload key - means user's key was used for upload)
+    if (!apiKey) {
+      const { data: userSecret } = await supabaseService
+        .from('user_secrets')
+        .select('encrypted_value')
+        .eq('user_id', userId)
+        .eq('secret_name', 'GEMINI_API_KEY')
+        .maybeSingle();
 
-    if (lockedKeyRows && lockedKeyRows.length > 0) {
-      const lockedKey = lockedKeyRows[0];
-      mutexKeyId = lockedKey.key_id;
-      keyQueue.push({ key: lockedKey.key_value, keyId: lockedKey.key_id, isUserProvided: false });
-      console.log(`[speaking-evaluate-job] Mutex: Locked API key ${mutexKeyId?.slice(0, 8)}... for job ${jobId}`);
-    } else {
-      // Fallback: get keys without mutex (legacy behavior)
-      console.warn('[speaking-evaluate-job] Mutex: No key available via mutex, falling back to legacy key selection');
-      const dbApiKeys = await getActiveGeminiKeysForModels(supabaseService, GEMINI_MODELS);
-      for (const dbKey of dbApiKeys) {
-        keyQueue.push({ key: dbKey.key_value, keyId: dbKey.id, isUserProvided: false });
+      if (userSecret?.encrypted_value && appEncryptionKey) {
+        try {
+          apiKey = await decryptKey(userSecret.encrypted_value, appEncryptionKey);
+          isUserProvidedKey = true;
+          console.log('[speaking-evaluate-job] Using user-provided API key');
+        } catch (e) {
+          console.warn('[speaking-evaluate-job] Failed to decrypt user key:', e);
+        }
       }
     }
 
-    if (keyQueue.length === 0) throw new Error('No API keys available');
-    console.log(`[speaking-evaluate-job] Key queue: ${keyQueue.length} keys (mutex locked: ${!!mutexKeyId})`);
+    // PRIORITY 3: Fallback to any admin key (last resort - may not work if files were uploaded with different key)
+    if (!apiKey) {
+      console.warn('[speaking-evaluate-job] No matching upload key found, falling back to any admin key (may fail due to file access)');
+      const { data: lockedKeyRows } = await supabaseService.rpc('checkout_api_key', {
+        p_job_id: jobId,
+        p_model_name: GEMINI_MODEL,
+        p_lock_minutes: 2,
+      });
+
+      if (lockedKeyRows && lockedKeyRows.length > 0) {
+        const lockedKey = lockedKeyRows[0];
+        apiKey = lockedKey.key_value;
+        apiKeyId = lockedKey.key_id;
+        console.log(`[speaking-evaluate-job] Using fallback API key via mutex: ${apiKeyId?.slice(0, 8)}...`);
+      }
+    }
+
+    if (!apiKey) {
+      throw new Error('No API key available for evaluation');
+    }
 
     // Determine which part to evaluate next
     const currentPart = (job.current_part as number) || 0;
@@ -382,133 +397,109 @@ serve(async (req) => {
       // Build part-specific prompt
       const partPrompt = buildPartPrompt(partToProcess as 1 | 2 | 3, segments, topic || testRow.topic, difficulty || testRow.difficulty, fluency_flag && partToProcess === 2);
 
-      // Evaluate this part
+      // Evaluate this part with SINGLE model (gemini-2.5-flash only)
       let partResult: any = null;
       
       // Create performance logger for this task
       const perfLogger = createPerformanceLogger('evaluate_speaking');
 
-      for (const candidateKey of keyQueue) {
-        if (partResult) break;
-        
+      const genAI = new GoogleGenerativeAI(apiKey);
+      console.log(`[speaking-evaluate-job] Part ${partToProcess}: using ${GEMINI_MODEL}`);
+      const callStart = Date.now();
+      
+      const model = genAI.getGenerativeModel({ 
+        model: GEMINI_MODEL,
+        generationConfig: {
+          temperature: 0.3,
+          maxOutputTokens: 20000,
+          responseMimeType: 'application/json',
+        },
+      });
+
+      const contentParts: any[] = [...partFileUris, { text: partPrompt }];
+
+      const MAX_RETRIES = 3;
+      for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
         try {
-          const genAI = new GoogleGenerativeAI(candidateKey.key);
+          // Update heartbeat
+          await supabaseService
+            .from('speaking_evaluation_jobs')
+            .update({ 
+              heartbeat_at: new Date().toISOString(),
+              lock_expires_at: new Date(Date.now() + LOCK_DURATION_MINUTES * 60 * 1000).toISOString(),
+            })
+            .eq('id', jobId)
+            .eq('lock_token', lockToken);
 
-          for (const modelName of GEMINI_MODELS) {
-            if (partResult) break;
+          const response = await withTimeout(
+            model.generateContent({ contents: [{ role: 'user', parts: contentParts }] }),
+            AI_CALL_TIMEOUT_MS,
+            `Gemini ${GEMINI_MODEL} Part ${partToProcess}`
+          );
+          const text = response.response?.text?.() || '';
+          const responseTimeMs = Date.now() - callStart;
 
-            // Note: With mutex locking, we're using a single locked key per part
-            // Model exhaustion checking is handled by the checkout_api_key function
+          if (!text) {
+            console.warn(`[speaking-evaluate-job] Empty response from ${GEMINI_MODEL}`);
+            await perfLogger.logError(GEMINI_MODEL, 'Empty response', responseTimeMs, apiKeyId || undefined);
+            throw new Error('Empty response from AI');
+          }
 
-            console.log(`[speaking-evaluate-job] Part ${partToProcess}: trying ${modelName}`);
-            const callStart = Date.now();
+          const parsed = parseJson(text);
+          if (parsed) {
+            partResult = parsed;
+            console.log(`[speaking-evaluate-job] Part ${partToProcess} success with ${GEMINI_MODEL}`);
+            await perfLogger.logSuccess(GEMINI_MODEL, responseTimeMs, apiKeyId || undefined);
+            break;
+          } else {
+            console.warn(`[speaking-evaluate-job] Failed to parse JSON from ${GEMINI_MODEL}. First 400 chars: ${text.slice(0, 400)}`);
+            await perfLogger.logError(GEMINI_MODEL, 'Failed to parse JSON', responseTimeMs, apiKeyId || undefined);
+            throw new Error('Failed to parse AI response as JSON');
+          }
+        } catch (err: any) {
+          const errMsg = String(err?.message || '');
+          const responseTimeMs = Date.now() - callStart;
+          console.error(`[speaking-evaluate-job] ${GEMINI_MODEL} failed (${attempt + 1}/${MAX_RETRIES}):`, errMsg.slice(0, 200));
+
+          // Check for PERMANENT daily quota exhaustion
+          if (isDailyQuotaExhaustedError(err)) {
+            console.log(`[speaking-evaluate-job] Daily quota exhausted for ${GEMINI_MODEL}`);
+            await perfLogger.logQuotaExceeded(GEMINI_MODEL, errMsg.slice(0, 200), apiKeyId || undefined);
             
-            const model = genAI.getGenerativeModel({ 
-              model: modelName,
-              generationConfig: {
-                temperature: 0.3,
-                maxOutputTokens: 20000,
-                responseMimeType: 'application/json', // Force JSON output for reliable parsing
-              },
-            });
+            if (!isUserProvidedKey && apiKeyId) {
+              await markModelQuotaExhausted(supabaseService, apiKeyId, GEMINI_MODEL);
+            }
+            throw new Error(`Daily quota exhausted for ${GEMINI_MODEL}`);
+          }
 
-            const contentParts: any[] = [...partFileUris, { text: partPrompt }];
-
-            const MAX_RETRIES = 2;
-            for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-              try {
-                // Update heartbeat
-                await supabaseService
-                  .from('speaking_evaluation_jobs')
-                  .update({ 
-                    heartbeat_at: new Date().toISOString(),
-                    lock_expires_at: new Date(Date.now() + LOCK_DURATION_MINUTES * 60 * 1000).toISOString(),
-                  })
-                  .eq('id', jobId)
-                  .eq('lock_token', lockToken);
-
-                const response = await withTimeout(
-                  model.generateContent({ contents: [{ role: 'user', parts: contentParts }] }),
-                  AI_CALL_TIMEOUT_MS,
-                  `Gemini ${modelName} Part ${partToProcess}`
-                );
-                const text = response.response?.text?.() || '';
-                const responseTimeMs = Date.now() - callStart;
-
-                if (!text) {
-                  console.warn(`[speaking-evaluate-job] Empty response from ${modelName}`);
-                  await perfLogger.logError(modelName, 'Empty response', responseTimeMs, candidateKey.keyId || undefined);
-                  break;
-                }
-
-                const parsed = parseJson(text);
-                if (parsed) {
-                  partResult = parsed;
-                  console.log(`[speaking-evaluate-job] Part ${partToProcess} success with ${modelName}`);
-                  await perfLogger.logSuccess(modelName, responseTimeMs, candidateKey.keyId || undefined);
-                  break;
-                } else {
-                  console.warn(`[speaking-evaluate-job] Failed to parse JSON from ${modelName}. First 400 chars: ${text.slice(0, 400)}`);
-                  await perfLogger.logError(modelName, 'Failed to parse JSON', responseTimeMs, candidateKey.keyId || undefined);
-                  break;
-                }
-              } catch (err: any) {
-                const errMsg = String(err?.message || '');
-                const responseTimeMs = Date.now() - callStart;
-                console.error(`[speaking-evaluate-job] ${modelName} failed (${attempt + 1}/${MAX_RETRIES}):`, errMsg.slice(0, 200));
-
-                // Check for PERMANENT daily quota exhaustion - use strict check
-                if (isDailyQuotaExhaustedError(err)) {
-                  console.log(`[speaking-evaluate-job] Daily quota exhausted for ${modelName}, marking model exhausted`);
-                  await perfLogger.logQuotaExceeded(modelName, errMsg.slice(0, 200), candidateKey.keyId || undefined);
-                  
-                  if (!candidateKey.isUserProvided && candidateKey.keyId) {
-                    await markModelQuotaExhausted(supabaseService, candidateKey.keyId, modelName);
-                  }
-                  
-                  // CRITICAL: Continue to next model instead of throwing
-                  // This allows fallback to other models (e.g., flash-lite) on the SAME key
-                  break; // Break retry loop, continue to next model
-                }
-
-                if (isQuotaExhaustedError(errMsg)) {
-                  const retryAfter = extractRetryAfterSeconds(err);
-                  if (attempt < MAX_RETRIES - 1) {
-                    // Use longer delays - minimum 10s, parse retry-after or use exponential backoff
-                    const delay = retryAfter 
-                      ? Math.min(retryAfter * 1000, MAX_RETRY_DELAY_MS) 
-                      : exponentialBackoffWithJitter(attempt, BASE_RETRY_DELAY_MS, MAX_RETRY_DELAY_MS);
-                    console.log(`[speaking-evaluate-job] Rate limited, retrying in ${Math.round(delay / 1000)}s...`);
-                    await sleep(delay);
-                    continue;
-                  } else {
-                    // Retries exhausted for rate limit - try next model instead of throwing
-                    console.log(`[speaking-evaluate-job] Rate limit retries exhausted for ${modelName}, trying next model...`);
-                    await perfLogger.logError(modelName, 'Rate limit retries exhausted: ' + errMsg.slice(0, 100), responseTimeMs, candidateKey.keyId || undefined);
-                    break; // Break retry loop, continue to next model
-                  }
-                }
-
-                if (attempt < MAX_RETRIES - 1) {
-                  const delay = exponentialBackoffWithJitter(attempt, BASE_RETRY_DELAY_MS, MAX_RETRY_DELAY_MS);
-                  console.log(`[speaking-evaluate-job] Error, retrying in ${Math.round(delay / 1000)}s...`);
-                  await sleep(delay);
-                  continue;
-                }
-                await perfLogger.logError(modelName, errMsg.slice(0, 200), responseTimeMs, candidateKey.keyId || undefined);
-                break;
-              }
+          if (isQuotaExhaustedError(errMsg)) {
+            const retryAfter = extractRetryAfterSeconds(err);
+            if (attempt < MAX_RETRIES - 1) {
+              const delay = retryAfter 
+                ? Math.min(retryAfter * 1000, MAX_RETRY_DELAY_MS) 
+                : exponentialBackoffWithJitter(attempt, BASE_RETRY_DELAY_MS, MAX_RETRY_DELAY_MS);
+              console.log(`[speaking-evaluate-job] Rate limited, retrying in ${Math.round(delay / 1000)}s...`);
+              await sleep(delay);
+              continue;
+            } else {
+              await perfLogger.logError(GEMINI_MODEL, 'Rate limit retries exhausted: ' + errMsg.slice(0, 100), responseTimeMs, apiKeyId || undefined);
+              throw new Error(`Rate limit retries exhausted for ${GEMINI_MODEL}`);
             }
           }
-      } catch (keyError: any) {
-          // Unexpected error with this key - log and try next key
-          console.error(`[speaking-evaluate-job] Key error:`, keyError?.message);
-          await sleep(KEY_SWITCH_DELAY_MS); // Add delay between key switches to prevent burst
+
+          if (attempt < MAX_RETRIES - 1) {
+            const delay = exponentialBackoffWithJitter(attempt, BASE_RETRY_DELAY_MS, MAX_RETRY_DELAY_MS);
+            console.log(`[speaking-evaluate-job] Error, retrying in ${Math.round(delay / 1000)}s...`);
+            await sleep(delay);
+            continue;
+          }
+          await perfLogger.logError(GEMINI_MODEL, errMsg.slice(0, 200), responseTimeMs, apiKeyId || undefined);
+          throw new Error(`Part ${partToProcess} evaluation failed: ${errMsg.slice(0, 100)}`);
         }
       }
 
       if (!partResult) {
-        throw new Error(`Part ${partToProcess} evaluation failed: all models/keys exhausted`);
+        throw new Error(`Part ${partToProcess} evaluation failed: no result after retries`);
       }
 
       // Save partial result
@@ -536,11 +527,9 @@ serve(async (req) => {
       heartbeatInterval = null;
     }
 
-    // Release API key mutex after completing this part
-    if (mutexKeyId) {
-      console.log(`[speaking-evaluate-job] Mutex: Releasing API key ${mutexKeyId.slice(0, 8)}...`);
-      await supabaseService.rpc('release_api_key', { p_job_id: jobId });
-    }
+    // Release API key mutex after completing this part (only if we used mutex checkout)
+    // Note: With the new upload_api_key_id tracking, mutex is only used as fallback
+    await supabaseService.rpc('release_api_key', { p_job_id: jobId });
 
     // CRITICAL: Add 5-second delay between part evaluations for RPM quota reset
     // This prevents 429 "Too Many Requests" errors when evaluating multiple parts

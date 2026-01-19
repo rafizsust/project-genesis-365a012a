@@ -242,7 +242,11 @@ serve(async (req) => {
     console.log(`[speaking-upload-job] Processing ${orderedSegments.length} segments`);
 
     // Get an API key for Google File API upload
+    // CRITICAL: We must track which key is used because Google File API files
+    // can ONLY be accessed by the same key that uploaded them
     let apiKey: string | null = null;
+    let uploadApiKeyId: string | null = null; // Track admin key ID for persistence
+    let isUserProvidedKey = false;
 
     // Try user's key first
     const { data: userSecret } = await supabaseService
@@ -255,6 +259,8 @@ serve(async (req) => {
     if (userSecret?.encrypted_value && appEncryptionKey) {
       try {
         apiKey = await decryptKey(userSecret.encrypted_value, appEncryptionKey);
+        isUserProvidedKey = true;
+        console.log('[speaking-upload-job] Using user-provided API key');
       } catch (e) {
         console.warn('[speaking-upload-job] Failed to decrypt user key:', e);
       }
@@ -265,6 +271,8 @@ serve(async (req) => {
       const dbApiKeys = await getActiveGeminiKeysForModel(supabaseService, 'flash_2_5');
       if (dbApiKeys.length > 0) {
         apiKey = dbApiKeys[0].key_value;
+        uploadApiKeyId = dbApiKeys[0].id; // Track which admin key we're using
+        console.log(`[speaking-upload-job] Using admin API key: ${uploadApiKeyId.slice(0, 8)}...`);
       }
     }
 
@@ -328,11 +336,13 @@ serve(async (req) => {
       heartbeatInterval = null;
     }
 
-    // Save Google File URIs and advance to eval stage
+    // Save Google File URIs and the API key ID used for upload
+    // CRITICAL: upload_api_key_id must be saved so evaluate job can use the same key
     await supabaseService
       .from('speaking_evaluation_jobs')
       .update({
         google_file_uris: googleFileUris,
+        upload_api_key_id: uploadApiKeyId, // Store the key ID (null if user-provided)
         upload_completed_at: new Date().toISOString(),
         status: 'pending',
         stage: 'pending_eval',
@@ -343,6 +353,8 @@ serve(async (req) => {
       })
       .eq('id', jobId)
       .eq('lock_token', lockToken);
+    
+    console.log(`[speaking-upload-job] Stored upload_api_key_id: ${uploadApiKeyId || 'user-provided'} for job ${jobId}`);
 
     console.log(`[speaking-upload-job] Upload complete for ${jobId}, ${Object.keys(googleFileUris).length} files`);
 

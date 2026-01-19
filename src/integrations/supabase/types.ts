@@ -1112,6 +1112,7 @@ export type Database = {
           topic: string | null
           total_parts: number | null
           updated_at: string
+          upload_api_key_id: string | null
           upload_completed_at: string | null
           user_id: string
         }
@@ -1142,6 +1143,7 @@ export type Database = {
           topic?: string | null
           total_parts?: number | null
           updated_at?: string
+          upload_api_key_id?: string | null
           upload_completed_at?: string | null
           user_id: string
         }
@@ -1172,10 +1174,19 @@ export type Database = {
           topic?: string | null
           total_parts?: number | null
           updated_at?: string
+          upload_api_key_id?: string | null
           upload_completed_at?: string | null
           user_id?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "speaking_evaluation_jobs_upload_api_key_id_fkey"
+            columns: ["upload_api_key_id"]
+            isOneToOne: false
+            referencedRelation: "api_keys"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       speaking_question_groups: {
         Row: {
