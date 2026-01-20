@@ -87,14 +87,44 @@ serve(async (req) => {
 
     console.log(`[upload-speaking-audio] Successfully uploaded ${Object.keys(uploadedUrls).length} files`);
 
-    // If updateResult is true, also update the ai_practice_results record with audio URLs
-    // This is used for text-based evaluation where audio is uploaded in background
+    // If updateResult is true, update both the job record (for pending evaluations) 
+    // and the ai_practice_results record (if evaluation is complete)
     if (updateResult && Object.keys(uploadedUrls).length > 0) {
       const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
       if (supabaseServiceKey) {
         const supabaseService = createClient(supabaseUrl, supabaseServiceKey);
         
-        // Retry logic: result may not exist yet if evaluation is still processing
+        // STEP 1: Update the speaking_evaluation_jobs record with file_paths
+        // This ensures audio URLs are available even if evaluation is still in progress
+        const { data: jobData, error: jobFindError } = await supabaseService
+          .from('speaking_evaluation_jobs')
+          .select('id, file_paths')
+          .eq('test_id', testId)
+          .eq('user_id', user.id)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        
+        if (jobFindError) {
+          console.warn('[upload-speaking-audio] Error finding job:', jobFindError.message);
+        } else if (jobData) {
+          // Merge new file paths with existing ones
+          const existingFilePaths = (jobData.file_paths || {}) as Record<string, string>;
+          const mergedJobFilePaths = { ...existingFilePaths, ...filePaths };
+          
+          const { error: jobUpdateError } = await supabaseService
+            .from('speaking_evaluation_jobs')
+            .update({ file_paths: mergedJobFilePaths })
+            .eq('id', jobData.id);
+          
+          if (jobUpdateError) {
+            console.warn('[upload-speaking-audio] Error updating job file_paths:', jobUpdateError.message);
+          } else {
+            console.log(`[upload-speaking-audio] Updated job ${jobData.id} with ${Object.keys(filePaths).length} file paths`);
+          }
+        }
+        
+        // STEP 2: Update the ai_practice_results record (retry logic for if evaluation completes later)
         const MAX_RETRIES = 3;
         const RETRY_DELAY_MS = 3000;
         
@@ -147,7 +177,7 @@ serve(async (req) => {
               console.log(`[upload-speaking-audio] No result found for test ${testId}, retrying in ${RETRY_DELAY_MS}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
               await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
             } else {
-              console.log(`[upload-speaking-audio] No result found for test ${testId} after ${MAX_RETRIES} attempts - audio URLs stored but not linked to result`);
+              console.log(`[upload-speaking-audio] No result found for test ${testId} after ${MAX_RETRIES} attempts - file paths stored in job record`);
             }
           }
         }
