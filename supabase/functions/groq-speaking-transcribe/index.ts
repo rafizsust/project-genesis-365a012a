@@ -43,7 +43,7 @@ const COMPRESSION_RATIO_THRESHOLD = 2.4;
 const POST_GAP_CONFIDENCE_THRESHOLD = 0.6;
 const GAP_DURATION_THRESHOLD = 2.0; // seconds
 
-// Hallucination patterns - known Whisper v3 artifacts
+// Hallucination patterns - known Whisper/Distil-Whisper artifacts
 const HALLUCINATION_PATTERNS = [
   /[가-힣]/g,              // Korean characters
   /[ぁ-んァ-ン]/g,          // Japanese hiragana/katakana
@@ -52,11 +52,25 @@ const HALLUCINATION_PATTERNS = [
   /[а-яА-ЯёЁ]/g,          // Cyrillic
   /[؀-ۿ]/g,               // Arabic
   /thank\s?you\.?\s*$/gi,  // Common hallucination endings
+  /thanks\s+for\s+watching/gi,
   /goodbye\.?\s*$/gi,
+  /bye\.?\s*$/gi,
   /see\s+(?:the\s+)?following/gi,
   /please\s+subscribe/gi,
   /like\s+and\s+subscribe/gi,
-  /\b(Melanie|publication|assembled|member|amara\.org)\b/gi,  // Known Whisper artifacts
+  /\b(Melanie|publication|assembled|member|amara\.org|subtitles|captions)\b/gi,  // Known Whisper artifacts
+  /^\s*\.\s*$/g,           // Just a period (common silence hallucination)
+  /^\s*,\s*$/g,            // Just a comma
+];
+
+// Additional phrases to strip from end of transcripts (often hallucinated during silence)
+const HALLUCINATION_END_PHRASES = [
+  /\s*thank\s*you\.?\s*$/gi,
+  /\s*thanks\.?\s*$/gi,
+  /\s*goodbye\.?\s*$/gi,
+  /\s*bye\.?\s*$/gi,
+  /\s*okay\.?\s*$/gi,
+  /\s*alright\.?\s*$/gi,
 ];
 
 // Check if text contains hallucination patterns
@@ -459,27 +473,27 @@ async function transcribeWithWhisper(
   const fileExtension = audioBlob.type.includes('mpeg') || audioBlob.type.includes('mp3') ? 'mp3' : 'webm';
   const formData = new FormData();
   formData.append('file', audioBlob, `audio.${fileExtension}`);
-  formData.append('model', 'whisper-large-v3-turbo');
+  
+  // Switch to Distil-Whisper for better hallucination handling
+  // Distil-Whisper is 6x faster and more robust against silence-induced hallucinations
+  formData.append('model', 'distil-whisper-large-v3-en');
   formData.append('response_format', 'verbose_json');
   formData.append('timestamp_granularities[]', 'word');
   formData.append('timestamp_granularities[]', 'segment');
   formData.append('language', 'en');
   formData.append('temperature', '0');  // Reduce randomness to minimize hallucinations
   
-  // Enhanced prompt to ensure FULL audio transcription with all details
-  // The prompt primes Whisper for IELTS-style responses and prevents early stopping
+  // Enhanced prompt specifically tuned for Distil-Whisper to prevent hallucinations
+  // Distil-Whisper is English-only so we can be more specific
   formData.append('prompt', 
-    'This is an IELTS speaking test recording in English. ' +
-    'Transcribe the ENTIRE audio from start to finish completely and accurately. ' +
-    'Do NOT stop early or truncate the transcription. ' +
-    'Include ALL filler words: um, uh, ah, er, hmm, like, you know, I mean, sort of, kind of. ' +
-    'Include ALL false starts, repetitions, and self-corrections exactly as spoken. ' +
-    'Include stutters and hesitations. ' +
-    'Write "[INAUDIBLE]" for unclear portions. ' +
-    'If there is complete silence, output "[NO SPEECH]". ' +
-    'Do not invent or add any words not actually spoken. ' +
-    'Do not add "thank you", "goodbye", or other phrases unless clearly spoken. ' +
-    'Only output English text - ignore any non-English sounds.'
+    'IELTS speaking test. English only. ' +
+    'Transcribe exactly what is spoken - nothing more. ' +
+    'Silence means no output for that period. ' +
+    'Include filler words: um, uh, like, you know. ' +
+    'Do NOT add: thank you, thanks for watching, goodbye, subscribe, Melanie, or any closing phrases. ' +
+    'Do NOT hallucinate words during pauses or silence. ' +
+    'If unclear, mark as [INAUDIBLE]. ' +
+    'Absolute silence = empty text.'
   );
 
   const response = await fetch(GROQ_API_URL, {
@@ -550,10 +564,12 @@ async function transcribeWithWhisper(
   // Rebuild text from filtered segments
   const filteredText = filteredSegments.map(s => s.text).join(' ').trim();
 
-  // Filter out common hallucination phrases at the end of audio
-  const cleanedText = filteredText
-    .replace(/\s*(thank you\.?|thanks\.?|goodbye\.?|bye\.?)\s*$/gi, '')
-    .trim();
+  // Filter out common hallucination phrases at the end of audio using our patterns
+  let cleanedText = filteredText;
+  for (const pattern of HALLUCINATION_END_PHRASES) {
+    cleanedText = cleanedText.replace(pattern, '');
+  }
+  cleanedText = cleanedText.trim();
 
   // If the filtered text is empty or significantly different, log it
   if (cleanedText !== result.text.trim()) {

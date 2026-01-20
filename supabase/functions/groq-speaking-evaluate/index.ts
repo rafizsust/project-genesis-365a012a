@@ -26,21 +26,29 @@ const corsHeaders = {
 
 const GROQ_LLM_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
-// Llama 4 Scout has 30K TPM (2.5x more than llama-3.3-70b-versatile's 12K TPM)
-const GROQ_LLM_MODEL = 'meta-llama/llama-4-scout-17b-16e-instruct';
+// DeepSeek R1 Distill Llama 70B - 128K context, excellent reasoning, free tier
+// Much better for structured output and following strict instructions
+const GROQ_LLM_MODEL = 'deepseek-r1-distill-llama-70b';
 
 async function callGroqLLMWithTokenFallback(opts: {
   apiKey: string;
   prompt: string;
   maxTokensCandidates: number[];
 }) {
-  // Compact system prompt to save tokens
-  const system = `You are a CERTIFIED IELTS Speaking Examiner. RULES:
-1. Valid JSON only matching the requested schema
-2. COMPLETE responses for ALL questions - no skips/duplicates
-3. Each segment_key = ONE unique model answer with its OWN transcript
-4. STRICT scoring: short/off-topic = Band 2-4 MAX
-5. EVERY weakness needs a quote example from transcript`;
+  // System prompt with STRICT word count enforcement
+  const system = `You are a CERTIFIED IELTS Speaking Examiner. CRITICAL RULES:
+
+1. OUTPUT: Valid JSON ONLY matching the exact schema
+2. COMPLETENESS: EVERY segment_key gets ONE unique modelAnswer - NO skips, NO duplicates
+3. STRICT SCORING: short/off-topic = Band 2-4 MAX
+4. WEAKNESSES: EVERY weakness MUST include a quoted example from transcript
+
+**MANDATORY MODEL ANSWER WORD COUNTS - YOU MUST FOLLOW THESE:**
+- Part 1 answers: MINIMUM 45 words, target 50-60 words
+- Part 2 answers: MINIMUM 150 words, target 160-180 words (THIS IS CRITICAL)
+- Part 3 answers: MINIMUM 60 words, target 70-85 words
+
+FAILURE TO MEET WORD COUNTS IS UNACCEPTABLE. Count your words before finalizing.`;
 
   let lastResponse: Response | null = null;
   for (const maxTokens of opts.maxTokensCandidates) {
@@ -418,7 +426,7 @@ serve(async (req) => {
       transcripts_by_question: transcriptsByQuestion,
       evaluationMetadata: {
         provider: 'groq',
-        sttModel: 'whisper-large-v3-turbo',
+        sttModel: 'distil-whisper-large-v3-en',
         llmModel: GROQ_LLM_MODEL,
         pronunciationEstimation: pronunciationEstimate,
         processingTimeMs: processingTime,
@@ -598,32 +606,63 @@ function buildEvaluationPrompt(
 
   const totalQuestions = transcriptions.length;
   
-  // Build COMPACT modelAnswers requirement - removed whyItWorks to save tokens
+  // Build modelAnswers requirement with EXPLICIT word count enforcement
   const modelAnswersReq = transcriptions.map(t => {
-    const limits = t.partNumber === 2 ? { min: 150, max: 180 } : t.partNumber === 3 ? { min: 60, max: 80 } : { min: 35, max: 50 };
-    return `{"segment_key":"${t.segmentKey}","partNumber":${t.partNumber},"questionNumber":${t.questionNumber},"estimatedBand":<1-9>,"modelAnswer":"<${limits.min}-${limits.max}w>","keyImprovements":["<1 tip>"]}`;
+    // STRICT word counts: P1=45-55w, P2=150-180w, P3=60-85w
+    const limits = t.partNumber === 2 
+      ? { min: 150, target: 170 } 
+      : t.partNumber === 3 
+        ? { min: 60, target: 75 } 
+        : { min: 45, target: 55 };
+    return `{"segment_key":"${t.segmentKey}","partNumber":${t.partNumber},"questionNumber":${t.questionNumber},"estimatedBand":<1-9>,"modelAnswer":"WRITE ${limits.min}+ WORDS HERE (target ${limits.target}w)","keyImprovements":["<1 tip>"]}`;
   }).join(',');
 
-  // Optimized prompt: ~40% smaller than original
-  return `IELTS Speaking Evaluation - Return valid JSON only.
+  // Enhanced prompt with DeepSeek R1's reasoning capabilities
+  return `IELTS Speaking Evaluation Task
 
-CONTEXT: Topic:${job.topic || 'General'} | Difficulty:${job.difficulty || 'Standard'} | Parts:${partNumbers.join(',')} | Questions:${totalQuestions}
+**CONTEXT:**
+- Topic: ${job.topic || 'General'}
+- Difficulty: ${job.difficulty || 'Standard'}
+- Parts covered: ${partNumbers.join(', ')}
+- Total questions: ${totalQuestions}
 
-SCORING RULES:
-- Off-topic/irrelevant→Band 2.5-3.5 | Very short(<10w)→Band 2-3 | Nonsense→Band 1.5-2.5 | Silent→Band 1-2
-- EVERY weakness MUST have quote: "[Issue] (e.g., '[quote]')"
-
-MODEL ANSWER LENGTHS: P1:35-50w | P2:150+w MANDATORY | P3:60-80w
-
-TRANSCRIPTS:
+**CANDIDATE TRANSCRIPTS:**
 ${transcriptSection}
 
-PRONUNCIATION: Band ${pronunciationEstimate.estimatedBand} (${pronunciationEstimate.confidence})
+**PRONUNCIATION ESTIMATE:** Band ${pronunciationEstimate.estimatedBand} (${pronunciationEstimate.confidence} confidence)
 
-OUTPUT:
-{"criteria":{"fluency_coherence":{"band":<1-9>,"feedback":"<2 sent>","strengths":[""],"weaknesses":["<with quote>"],"suggestions":[""]},"lexical_resource":{"band":<>,"feedback":"","strengths":[""],"weaknesses":["<with quote>"],"suggestions":[""]},"grammatical_range":{"band":<>,"feedback":"","strengths":[""],"weaknesses":["<with quote>"],"suggestions":[""]},"pronunciation":{"band":${pronunciationEstimate.estimatedBand},"feedback":"","strengths":[""],"weaknesses":[""],"suggestions":[""]}},"summary":"<2 sent>","examiner_notes":"<1 sent>","modelAnswers":[${modelAnswersReq}],"lexical_upgrades":[{"original":"","upgraded":"","context":""},{"original":"","upgraded":"","context":""},{"original":"","upgraded":"","context":""}],"part_notes":[],"improvement_priorities":["",""],"strengths_to_maintain":[""]}
+**SCORING GUIDELINES:**
+- Off-topic/irrelevant → Band 2.5-3.5
+- Very short (<10 words) → Band 2-3
+- Nonsense/gibberish → Band 1.5-2.5
+- Silent/no response → Band 1-2
+- EVERY weakness MUST include a direct quote: "Issue description (e.g., '[exact quote from transcript]')"
 
-CRITICAL: Part 2 modelAnswer MUST be 150+ words. No duplicates. Each segment_key = unique response.`;
+**CRITICAL - MODEL ANSWER WORD COUNT REQUIREMENTS:**
+⚠️ PART 1: Each answer MUST be AT LEAST 45 words (aim for 50-55 words)
+⚠️ PART 2: Answer MUST be AT LEAST 150 words (aim for 160-180 words) - THIS IS MANDATORY
+⚠️ PART 3: Each answer MUST be AT LEAST 60 words (aim for 70-85 words)
+
+WORD COUNTS ARE STRICTLY ENFORCED. Short model answers are UNACCEPTABLE.
+
+**OUTPUT FORMAT (valid JSON only):**
+{
+  "criteria": {
+    "fluency_coherence": {"band": <1-9>, "feedback": "<2 sentences>", "strengths": ["..."], "weaknesses": ["... (e.g., '[quote]')"], "suggestions": ["..."]},
+    "lexical_resource": {"band": <1-9>, "feedback": "<2 sentences>", "strengths": ["..."], "weaknesses": ["... (e.g., '[quote]')"], "suggestions": ["..."]},
+    "grammatical_range": {"band": <1-9>, "feedback": "<2 sentences>", "strengths": ["..."], "weaknesses": ["... (e.g., '[quote]')"], "suggestions": ["..."]},
+    "pronunciation": {"band": ${pronunciationEstimate.estimatedBand}, "feedback": "...", "strengths": ["..."], "weaknesses": ["..."], "suggestions": ["..."]}
+  },
+  "summary": "<2 sentence overall summary>",
+  "examiner_notes": "<1 sentence key observation>",
+  "modelAnswers": [${modelAnswersReq}],
+  "lexical_upgrades": [{"original": "...", "upgraded": "...", "context": "..."}, ...],
+  "part_notes": [],
+  "improvement_priorities": ["...", "..."],
+  "strengths_to_maintain": ["..."]
+}
+
+REMEMBER: Part 2 modelAnswer = 150+ words. Part 1 = 45+ words each. Part 3 = 60+ words each. NO EXCEPTIONS.`;
 }
 
 function getQuestionTextFromPayload(payload: any, partNumber: number, questionNumber: number, segmentKey: string): string {
