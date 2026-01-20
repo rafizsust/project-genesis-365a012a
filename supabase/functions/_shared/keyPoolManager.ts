@@ -91,7 +91,9 @@ export async function checkoutKeyForPart(
   if (appEncryptionKey && !skipUserKey) {
     const userKeyResult = await tryGetUserKey(supabaseService, userId, appEncryptionKey, modelName);
     if (userKeyResult.key) {
-      console.log(`[keyPoolManager] Using user's own API key`);
+      // User has a valid, non-exhausted API key - use it
+      // Note: keyId='user' is a sentinel value indicating this is a user-provided key, not from admin pool
+      console.log(`[keyPoolManager] User has personal API key (not exhausted), using it`);
       return { keyId: 'user', keyValue: userKeyResult.key, isUserKey: true };
     }
     userKeyChecked = true;
@@ -99,9 +101,9 @@ export async function checkoutKeyForPart(
     // If userKeyResult.exhausted is true, user has a key but it's exhausted for this model
     // If userKeyResult.noKey is true, user has no key configured at all
     if (userKeyResult.exhausted) {
-      console.log(`[keyPoolManager] User's key is exhausted for ${modelName}, falling back to admin pool`);
+      console.log(`[keyPoolManager] User's personal API key is exhausted for ${modelName}, falling back to admin pool`);
     } else if (userKeyResult.noKey) {
-      console.log(`[keyPoolManager] User has no API key configured, using admin pool`);
+      console.log(`[keyPoolManager] User has no personal API key configured, using admin pool`);
     }
   }
   

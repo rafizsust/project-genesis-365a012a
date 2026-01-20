@@ -211,17 +211,48 @@ export function InlineProgressBanner({
   const stageLabel = getStageLabel(stage, currentPart);
 
   // Prevent the progress bar from "jumping backwards" when the backend stage briefly returns
-  // to a low-progress label (e.g., "queuing" between parts). Reset only when startTime changes.
-  const maxProgressRef = useRef<{ key: string; max: number }>({ key: '', max: 0 });
-  const progressKey = startTime ? String(startTime) : '__no_start_time__';
+  // to a low-progress label (e.g., "queuing" between parts). 
+  // 
+  // IMPORTANT: We use a stable session key that includes both startTime AND stage terminal state.
+  // This prevents resets when:
+  // 1. The startTime updates slightly during the same evaluation
+  // 2. The job transitions between stages
+  //
+  // We only reset when:
+  // 1. Component mounts fresh (new session)
+  // 2. Stage becomes 'completed' or 'failed' (terminal states, allow fresh start next time)
+  const maxProgressRef = useRef<{ sessionId: string; max: number; lastNonTerminalStage: string | null }>({ 
+    sessionId: '', 
+    max: 0,
+    lastNonTerminalStage: null 
+  });
   
-  // Reset max progress only when the evaluation job itself restarts (new startTime)
-  if (maxProgressRef.current.key !== progressKey) {
-    maxProgressRef.current.key = progressKey;
+  // Create a session ID based on startTime's date portion only (ignore milliseconds variations)
+  const sessionDate = startTime ? new Date(startTime).toISOString().slice(0, 16) : ''; // YYYY-MM-DDTHH:MM
+  const sessionId = `${sessionDate}-${stage === 'completed' || stage === 'failed' ? 'terminal' : 'active'}`;
+  
+  // Check if this is a terminal stage that should reset progress tracking
+  const isTerminalStage = stage === 'completed' || stage === 'failed' || stage === 'cancelled';
+  
+  // Only reset max progress when session ID fundamentally changes (new evaluation starts)
+  // OR when we transition FROM a terminal state TO a new active state
+  const shouldReset = maxProgressRef.current.sessionId !== sessionId && !isTerminalStage && maxProgressRef.current.max >= 100;
+  
+  if (shouldReset) {
+    console.log('[InlineProgressBanner] Resetting progress for new session:', sessionId);
+    maxProgressRef.current.sessionId = sessionId;
     maxProgressRef.current.max = 0;
+  } else if (maxProgressRef.current.sessionId !== sessionId) {
+    maxProgressRef.current.sessionId = sessionId;
+    // Don't reset max - preserve accumulated progress within the same evaluation
   }
   
-  // Always advance max progress - never go backwards
+  // Track last non-terminal stage
+  if (!isTerminalStage) {
+    maxProgressRef.current.lastNonTerminalStage = stage;
+  }
+  
+  // Always advance max progress - never go backwards during active evaluation
   maxProgressRef.current.max = Math.max(maxProgressRef.current.max, calculatedProgress);
   const displayProgress = maxProgressRef.current.max;
 

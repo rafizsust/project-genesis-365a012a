@@ -414,7 +414,7 @@ serve(async (req) => {
         throw new Error('Key checkout returned invalid data. Please try again.');
       }
 
-      console.log(`[speaking-evaluate-job] Part ${partToProcess}: Using ${isUserKey ? 'user' : 'admin'} key ${currentKeyId.slice(0, 8)}...`);
+      console.log(`[speaking-evaluate-job] Part ${partToProcess}: Using ${isUserKey ? 'user\'s personal' : 'admin'} key ${isUserKey ? '(personal)' : currentKeyId.slice(0, 8) + '...'}`);
 
       // Build inline audio parts for Gemini
       const inlineAudioParts = segments.map(seg => {

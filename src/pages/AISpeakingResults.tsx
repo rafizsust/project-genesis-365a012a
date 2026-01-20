@@ -400,22 +400,24 @@ export default function AISpeakingResults() {
     setTestPayload(testRow?.payload || null);
     // The URL param can be either the test_id OR the result's own id (from parallel mode)
     // First try by test_id, then fallback to id
+    // IMPORTANT: Always fetch all results for this test and get the LATEST by completed_at
     let data = null;
     let error = null;
     
-    // Try by test_id first (most common case)
-    const { data: byTestId, error: errByTestId } = await supabase
+    // Try by test_id first (most common case) - get the MOST RECENT result
+    const { data: allResults, error: errByTestId } = await supabase
       .from('ai_practice_results')
       .select('*')
       .eq('test_id', testId)
       .eq('user_id', user.id)
       .eq('module', 'speaking')
       .order('completed_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
+      .limit(5); // Get last 5 to find the latest
     
-    if (byTestId) {
-      data = byTestId;
+    if (allResults && allResults.length > 0) {
+      // Pick the most recent result
+      data = allResults[0];
+      console.log('[AISpeakingResults] Found', allResults.length, 'results, using latest:', data.id, 'band:', data.band_score, 'completed:', data.completed_at);
     } else {
       // Fallback: maybe testId is actually the result's own id (from parallel mode redirect)
       const { data: byResultId, error: errByResultId } = await supabase
