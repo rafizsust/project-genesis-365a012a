@@ -213,7 +213,7 @@ serve(async (req) => {
     const llmResponse = await callGroqLLMWithTokenFallback({
       apiKey: groqApiKey,
       prompt: evaluationPrompt,
-      maxTokensCandidates: [40000, 24000],
+      maxTokensCandidates: [8192, 6144],  // Reduced for reliable Groq output
     });
 
     if (!llmResponse.ok) {
@@ -233,6 +233,18 @@ serve(async (req) => {
 
     const llmResult = await llmResponse.json();
     const processingTime = Date.now() - startTime;
+
+    // Log token usage for debugging truncation
+    const usage = llmResult.usage;
+    if (usage) {
+      console.log(`[groq-speaking-evaluate] Tokens: prompt=${usage.prompt_tokens}, completion=${usage.completion_tokens}, total=${usage.total_tokens}`);
+    }
+    
+    // Check for truncation
+    const finishReason = llmResult.choices?.[0]?.finish_reason;
+    if (finishReason === 'length') {
+      console.warn(`[groq-speaking-evaluate] ⚠️ Response may be truncated (finish_reason=length)`);
+    }
 
     console.log(`[groq-speaking-evaluate] LLM response received in ${processingTime}ms`);
 
@@ -384,33 +396,14 @@ serve(async (req) => {
         }))
       : lexicalUpgrades; // Fallback to lexical_upgrades if not provided
 
-    // Extract part_analysis - ensure we have analysis for ALL parts present in the test
-    const rawPartAnalysis = Array.isArray(evaluation?.part_analysis) ? evaluation.part_analysis : [];
-    const partAnalysis = partNumbers.map(partNum => {
-      const match = rawPartAnalysis.find((p: any) => 
-        p.part_number === partNum || p.partNumber === partNum
-      );
-      
-      if (match) {
-        return {
-          part_number: partNum,
-          performance_notes: match.performance_notes || match.performanceNotes || match.comment || '',
-          key_moments: Array.isArray(match.key_moments) ? match.key_moments : (Array.isArray(match.keyMoments) ? match.keyMoments : []),
-          areas_for_improvement: Array.isArray(match.areas_for_improvement) ? match.areas_for_improvement : (Array.isArray(match.areasForImprovement) ? match.areasForImprovement : []),
-        };
-      }
-      
-      // If no match found, create a placeholder
-      console.warn(`[groq-speaking-evaluate] No part analysis found for Part ${partNum}`);
-      return {
-        part_number: partNum,
-        performance_notes: `Analysis for Part ${partNum}`,
-        key_moments: [],
-        areas_for_improvement: [],
-      };
-    });
+    // Extract part_notes (optional - only for critical issues)
+    const rawPartNotes = Array.isArray(evaluation?.part_notes) ? evaluation.part_notes : [];
+    const partNotes = rawPartNotes.map((n: any) => ({
+      part: n.part || n.part_number,
+      note: n.note || n.issue || '',
+    })).filter((n: any) => n.note);
 
-    // Build final result matching Gemini schema exactly
+    // Build final result matching Gemini schema exactly (without part_analysis to save tokens)
     const finalResult = {
       overall_band: overallBand,
       criteria,
@@ -419,7 +412,7 @@ serve(async (req) => {
       modelAnswers,
       lexical_upgrades: lexicalUpgrades,
       vocabulary_upgrades: vocabularyUpgrades,
-      part_analysis: partAnalysis,
+      part_notes: partNotes.length > 0 ? partNotes : undefined,  // Optional, only if issues exist
       improvement_priorities: Array.isArray(evaluation?.improvement_priorities) ? evaluation.improvement_priorities : [],
       strengths_to_maintain: Array.isArray(evaluation?.strengths_to_maintain) ? evaluation.strengths_to_maintain : [],
       transcripts_by_part: transcriptsByPart,
@@ -586,7 +579,7 @@ function estimatePronunciation(transcriptions: TranscriptionSegment[]): Pronunci
 }
 
 // ============================================================================
-// Prompt Builder (Gemini-compatible output schema)
+// Prompt Builder (Optimized for token efficiency)
 // ============================================================================
 
 function buildEvaluationPrompt(
@@ -638,27 +631,18 @@ ${pauseInfo}
     3: { min: 60, max: 80, target: 70 },
   };
 
-  // Build part_analysis requirement
-  const partAnalysisRequirement = partNumbers.map(p => `{
-      "part_number": ${p},
-      "performance_notes": "<2-3 sentence assessment of Part ${p} with specific examples>",
-      "key_moments": ["<positive moment with direct quote>", "<another positive with quote>"],
-      "areas_for_improvement": ["<issue with direct quote>", "<another issue with quote>", "<third issue with quote>"]
-    }`).join(',\n    ');
-
   // Build modelAnswers requirement showing ALL questions with strict word counts
-  const modelAnswersRequirement = segmentInfo.map((s, i) => {
-    const limits = modelAnswerWordLimits[s.partNumber] || { target: 50 };
+  // Removed whyItWorks to save tokens - focus on modelAnswer and keyImprovements
+  const modelAnswersRequirement = segmentInfo.map((s) => {
+    const limits = modelAnswerWordLimits[s.partNumber] || { target: 50, min: 30, max: 60 };
     const wordTarget = limits.target;
     return `{
       "segment_key": "${s.segment_key}",
       "partNumber": ${s.partNumber},
       "questionNumber": ${s.questionNumber},
-      "estimatedBand": <band for this specific response 1.0-9.0>,
-      "targetBand": <estimatedBand + 1, max 9>,
-      "modelAnswer": "<COMPLETE ${wordTarget}-word model answer - MUST be exactly ${limits.min}-${limits.max} words>",
-      "whyItWorks": ["<specific reason why model answer is better>", "<second reason>"],
-      "keyImprovements": ["<specific improvement from their answer>", "<second improvement>"]
+      "estimatedBand": <band 1.0-9.0>,
+      "modelAnswer": "<COMPLETE ${wordTarget}-word model answer - MUST be ${limits.min}-${limits.max} words>",
+      "keyImprovements": ["<main improvement from their answer>"]
     }`;
   }).join(',\n    ');
 
@@ -674,155 +658,106 @@ Parts covered: ${partNumbers.join(', ')}
 Total questions: ${totalQuestions}
 
 ══════════════════════════════════════════════════════════════
-🚨 CRITICAL: SCORING FOR INADEQUATE RESPONSES 🚨
+🚨 TOKEN PRIORITY ORDER (CRITICAL) 🚨
+══════════════════════════════════════════════════════════════
+1. NEVER truncate Part 2 modelAnswer (150+ words MANDATORY)
+2. Complete ALL modelAnswers with required word counts
+3. Complete criteria feedback with examples in weaknesses
+4. Skip part_notes if not needed
+5. Reduce lexical_upgrades to 3 items if needed
+
+══════════════════════════════════════════════════════════════
+🚨 SCORING FOR INADEQUATE RESPONSES 🚨
 ══════════════════════════════════════════════════════════════
 
 Apply STRICT penalties for responses that are:
-- OFF-TOPIC or IRRELEVANT to the question
-- Extremely SHORT (under 10 meaningful words)
-- REPETITIVE NONSENSE (e.g., "nice nice nice nice")
-- Single word answers (e.g., "drama", "yes", "no")
-- Just reading the question back
-
-⚠️ SCORING REQUIREMENTS FOR INADEQUATE RESPONSES:
-- Transcript < 10 meaningful words → Band 2.0-3.0 MAX
-- Off-topic/irrelevant → Band 2.5-3.5 MAX
-- Just repetition of same word → Band 1.5-2.5 MAX
+- OFF-TOPIC or IRRELEVANT → Band 2.5-3.5 MAX
+- Extremely SHORT (under 10 words) → Band 2.0-3.0 MAX
+- REPETITIVE NONSENSE → Band 1.5-2.5 MAX
 - Single word or "[NO SPEECH]" → Band 1.0-2.0 MAX
 
-DO NOT give Band 5+ for responses like:
-❌ "nice nice nice that's true" → Band 2.0
-❌ "drama" → Band 1.5
-❌ "yes I think so" (no elaboration) → Band 3.0-3.5
-
 ══════════════════════════════════════════════════════════════
-🚨🚨🚨 ABSOLUTE REQUIREMENT: EVERY WEAKNESS MUST HAVE AN EXAMPLE 🚨🚨🚨
+🚨 EVERY WEAKNESS MUST HAVE AN EXAMPLE 🚨
 ══════════════════════════════════════════════════════════════
 
-⚠️ NEVER provide a weakness without a direct quote example from the transcript.
-⚠️ Weaknesses without examples are INVALID and must not be included.
+MANDATORY FORMAT: "[Issue] (e.g., '[exact quote from transcript]')"
 
-MANDATORY FORMAT for ALL weaknesses:
-"[Issue description] (e.g., '[exact quote from their transcript]')"
+❌ INVALID: "Some grammar errors"
+✅ VALID: "Subject-verb agreement errors (e.g., 'the people goes')"
 
-❌ INVALID (NO EXAMPLE): "Some grammar errors"
-❌ INVALID (NO EXAMPLE): "Limited vocabulary"
-❌ INVALID (NO EXAMPLE): "Could improve sentence structure"
-❌ INVALID (NO EXAMPLE): "Occasional grammatical errors, such as subject-verb agreement issues"
-
-✅ VALID: "Subject-verb agreement errors (e.g., 'the people goes' instead of 'the people go')"
-✅ VALID: "Repetitive use of basic words (e.g., used 'good' 4 times - should use 'beneficial', 'excellent')"
-✅ VALID: "Run-on sentences without proper connectors (e.g., 'I like it because it is good I use it every day')"
-
-If you cannot find a specific example for a weakness, DO NOT include that weakness.
+If no example exists, DO NOT include that weakness.
 
 ══════════════════════════════════════════════════════════════
-🚨 STRICT MODEL ANSWER WORD LIMITS 🚨
+🚨 MODEL ANSWER WORD LIMITS 🚨
 ══════════════════════════════════════════════════════════════
 
-Part 1: 35-50 words per answer (target: 40) - concise but complete
-Part 2: MINIMUM 150 words (target: 165) - THIS IS MANDATORY for long turn
-Part 3: 60-80 words per answer (target: 70) - balanced discussion
-
-⚠️ Part 2 model answers under 150 words are INVALID.
-⚠️ Prioritize Part 2 word count over Part 1/3 if token limits are tight.
+Part 1: 35-50 words | Part 2: 150+ words (MANDATORY) | Part 3: 60-80 words
 
 ══════════════════════════════════════════════════════════════
-TRANSCRIPTION DATA (from Whisper STT)
+TRANSCRIPTION DATA
 ══════════════════════════════════════════════════════════════
 ${transcriptSection}
 
 ══════════════════════════════════════════════════════════════
-PRONUNCIATION ESTIMATION (from transcription confidence)
+PRONUNCIATION ESTIMATION
 ══════════════════════════════════════════════════════════════
-**Estimated Band:** ${pronunciationEstimate.estimatedBand}
-**Confidence:** ${pronunciationEstimate.confidence}
-${pronunciationEstimate.evidence.map(e => `- ${e}`).join('\n')}
-
-Note: Pronunciation is estimated from audio clarity and word recognition confidence.
-Adjust this band ±0.5 based on fluency markers in the transcript.
+Estimated Band: ${pronunciationEstimate.estimatedBand} (${pronunciationEstimate.confidence})
 
 ══════════════════════════════════════════════════════════════
-OUTPUT JSON SCHEMA (FOLLOW EXACTLY)
+OUTPUT JSON SCHEMA
 ══════════════════════════════════════════════════════════════
 
 {
   "criteria": {
     "fluency_coherence": {
-      "band": <number 1.0-9.0 in 0.5 increments>,
-      "feedback": "<2 sentences addressing pauses, hesitations, flow>",
-      "strengths": ["<strength with quote>"],
-      "weaknesses": ["<MUST include quote: 'Issue (e.g., exact words from transcript)'>"],
-      "suggestions": ["<actionable tip>"]
+      "band": <1.0-9.0>,
+      "feedback": "<2 sentences>",
+      "strengths": ["<strength>"],
+      "weaknesses": ["<MUST include quote example>"],
+      "suggestions": ["<tip>"]
     },
     "lexical_resource": {
       "band": <number>,
-      "feedback": "<2 sentences on vocabulary range>",
-      "strengths": ["<strength with example>"],
-      "weaknesses": ["<MUST include quote: 'Issue (e.g., they said X instead of Y)'>"],
+      "feedback": "<2 sentences>",
+      "strengths": ["<strength>"],
+      "weaknesses": ["<MUST include quote example>"],
       "suggestions": ["<tip>"]
     },
     "grammatical_range": {
       "band": <number>,
-      "feedback": "<2 sentences on grammar variety>",
+      "feedback": "<2 sentences>",
       "strengths": ["<strength>"],
-      "weaknesses": ["<MUST include quote: 'Error type (e.g., their exact grammar mistake)'>"],
+      "weaknesses": ["<MUST include quote example>"],
       "suggestions": ["<tip>"]
     },
     "pronunciation": {
       "band": ${pronunciationEstimate.estimatedBand},
-      "feedback": "<1 sentence - estimated from audio clarity>",
+      "feedback": "<1 sentence>",
       "strengths": ["<strength>"],
       "weaknesses": ["<based on transcription confidence>"],
       "suggestions": ["<tip>"]
     }
   },
-  "summary": "<2-3 sentence overall assessment>",
-  "examiner_notes": "<1 sentence on critical improvement>",
+  "summary": "<2-3 sentence assessment>",
+  "examiner_notes": "<1 sentence critical improvement>",
   "modelAnswers": [
     ${modelAnswersRequirement}
   ],
   "lexical_upgrades": [
-    {"original": "<word from transcript>", "upgraded": "<better word>", "context": "<short usage>"},
-    {"original": "...", "upgraded": "...", "context": "..."},
-    {"original": "...", "upgraded": "...", "context": "..."},
+    {"original": "<word>", "upgraded": "<better>", "context": "<usage>"},
     {"original": "...", "upgraded": "...", "context": "..."},
     {"original": "...", "upgraded": "...", "context": "..."}
   ],
-  "vocabulary_upgrades": [
-    {"original": "<basic word>", "upgraded": "<advanced>", "context": "<example>"},
-    {"original": "...", "upgraded": "...", "context": "..."},
-    {"original": "...", "upgraded": "...", "context": "..."},
-    {"original": "...", "upgraded": "...", "context": "..."},
-    {"original": "...", "upgraded": "...", "context": "..."},
-    {"original": "...", "upgraded": "...", "context": "..."}
-  ],
-  "part_analysis": [
-    ${partAnalysisRequirement}
-  ],
-  "improvement_priorities": ["<most important priority>", "<second priority>", "<third priority>"],
-  "strengths_to_maintain": ["<key strength to keep>", "<second strength>"]
+  "part_notes": [],
+  "improvement_priorities": ["<top priority>", "<second>"],
+  "strengths_to_maintain": ["<key strength>"]
 }
 
-══════════════════════════════════════════════════════════════
-🚨 MANDATORY VALIDATION CHECKLIST 🚨
-══════════════════════════════════════════════════════════════
-
-Before outputting, verify:
-- [ ] modelAnswers has EXACTLY ${totalQuestions} entries (one per question)
-- [ ] Each modelAnswer has the FULL question text from the segment
-- [ ] Each modelAnswer has the CORRECT transcript for that question (NOT duplicated)
-- [ ] Part 2 model answer is AT LEAST 150 words (MANDATORY - check carefully!)
-- [ ] Part 1 answers: 35-50 words, Part 3 answers: 60-80 words
-- [ ] part_analysis has EXACTLY ${partNumbers.length} entries for parts: ${partNumbers.join(', ')}
-- [ ] lexical_upgrades has AT LEAST 5 entries with real examples
-- [ ] vocabulary_upgrades has AT LEAST 5 entries (can share with lexical)
-- [ ] EVERY weakness includes (e.g., 'exact quote') - NO EXCEPTIONS
-- [ ] Bands are realistic: inadequate responses get Band 2-4, not 5+
-
-🚨 CRITICAL: Each modelAnswer MUST correspond to its specific question with the correct transcript. Do NOT copy the same transcript to all answers.
-
-Be fair, rigorous, and follow official IELTS band descriptors exactly.
+NOTES:
+- "part_notes" is OPTIONAL: only include if critical issue (e.g., very short response, off-topic)
+  Example: [{"part": 2, "note": "Response only 15 words"}]
+- Verify Part 2 modelAnswer is AT LEAST 150 words before outputting
+- Each modelAnswer must use correct transcript (no duplicates)
 `;
 }
 

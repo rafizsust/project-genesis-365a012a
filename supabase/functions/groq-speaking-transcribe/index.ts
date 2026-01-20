@@ -32,7 +32,32 @@ const GROQ_API_URL = 'https://api.groq.com/openai/v1/audio/transcriptions';
 const INTER_SEGMENT_DELAY_MS = 1000;
 
 // Threshold for no_speech_prob above which we consider the segment silent
-const NO_SPEECH_THRESHOLD = 0.8;
+// Lowered from 0.8 to 0.5 to catch more Whisper hallucinations
+const NO_SPEECH_THRESHOLD = 0.5;
+
+// Compression ratio above which segments are likely hallucinations
+const COMPRESSION_RATIO_THRESHOLD = 2.4;
+
+// Hallucination patterns - known Whisper v3 artifacts
+const HALLUCINATION_PATTERNS = [
+  /[가-힣]/g,              // Korean characters
+  /[ぁ-んァ-ン]/g,          // Japanese hiragana/katakana
+  /[一-龯]/g,              // Chinese characters
+  /[ก-๙]/g,               // Thai characters
+  /[а-яА-ЯёЁ]/g,          // Cyrillic
+  /[؀-ۿ]/g,               // Arabic
+  /thank\s?you\.?\s*$/gi,  // Common hallucination endings
+  /goodbye\.?\s*$/gi,
+  /see\s+(?:the\s+)?following/gi,
+  /please\s+subscribe/gi,
+  /like\s+and\s+subscribe/gi,
+  /\b(Melanie|publication|assembled|member|amara\.org)\b/gi,  // Known Whisper artifacts
+];
+
+// Check if text contains hallucination patterns
+function containsHallucinationPatterns(text: string): boolean {
+  return HALLUCINATION_PATTERNS.some(pattern => pattern.test(text));
+}
 
 interface WhisperWord {
   word: string;
@@ -384,11 +409,12 @@ async function transcribeWithWhisper(
   formData.append('timestamp_granularities[]', 'word');
   formData.append('timestamp_granularities[]', 'segment');
   formData.append('language', 'en');
+  formData.append('temperature', '0');  // Reduce randomness to minimize hallucinations
   
   // Enhanced prompt to ensure FULL audio transcription with all details
   // The prompt primes Whisper for IELTS-style responses and prevents early stopping
   formData.append('prompt', 
-    'This is an IELTS speaking test recording. ' +
+    'This is an IELTS speaking test recording in English. ' +
     'Transcribe the ENTIRE audio from start to finish completely and accurately. ' +
     'Do NOT stop early or truncate the transcription. ' +
     'Include ALL filler words: um, uh, ah, er, hmm, like, you know, I mean, sort of, kind of. ' +
@@ -397,7 +423,8 @@ async function transcribeWithWhisper(
     'Write "[INAUDIBLE]" for unclear portions. ' +
     'If there is complete silence, output "[NO SPEECH]". ' +
     'Do not invent or add any words not actually spoken. ' +
-    'Do not add "thank you", "goodbye", or other phrases unless clearly spoken.'
+    'Do not add "thank you", "goodbye", or other phrases unless clearly spoken. ' +
+    'Only output English text - ignore any non-English sounds.'
   );
 
   const response = await fetch(GROQ_API_URL, {
@@ -424,12 +451,26 @@ async function transcribeWithWhisper(
     ? result.segments.reduce((sum, s) => sum + (s.no_speech_prob || 0), 0) / result.segments.length
     : 0;
 
-  // Filter out segments with high no_speech probability to prevent hallucinations
+  // Filter out segments with high no_speech probability, high compression ratio, or hallucination patterns
   const filteredSegments = result.segments?.filter(s => {
+    // Filter by no_speech probability
     if (s.no_speech_prob > NO_SPEECH_THRESHOLD) {
-      console.log(`[groq-speaking-transcribe] Filtering out segment with no_speech_prob=${s.no_speech_prob.toFixed(2)}: "${s.text}"`);
+      console.log(`[groq-speaking-transcribe] Filtering segment (no_speech=${s.no_speech_prob.toFixed(2)}): "${s.text}"`);
       return false;
     }
+    
+    // Filter by compression ratio (hallucinations often have high compression)
+    if (s.compression_ratio > COMPRESSION_RATIO_THRESHOLD) {
+      console.log(`[groq-speaking-transcribe] Filtering segment (compression=${s.compression_ratio.toFixed(2)}): "${s.text}"`);
+      return false;
+    }
+    
+    // Filter by hallucination patterns (non-English, known artifacts)
+    if (containsHallucinationPatterns(s.text)) {
+      console.log(`[groq-speaking-transcribe] Filtering segment (hallucination pattern): "${s.text}"`);
+      return false;
+    }
+    
     return true;
   }) || [];
 
