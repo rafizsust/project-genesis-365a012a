@@ -1301,6 +1301,7 @@ export type Database = {
           id: string
           max_groq_retries: number
           provider: string
+          singleton_key: string
           updated_at: string
         }
         Insert: {
@@ -1312,6 +1313,7 @@ export type Database = {
           id?: string
           max_groq_retries?: number
           provider?: string
+          singleton_key?: string
           updated_at?: string
         }
         Update: {
@@ -1323,6 +1325,7 @@ export type Database = {
           id?: string
           max_groq_retries?: number
           provider?: string
+          singleton_key?: string
           updated_at?: string
         }
         Relationships: []

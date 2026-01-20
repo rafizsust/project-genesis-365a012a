@@ -196,27 +196,25 @@ export default function AdminSettings() {
     try {
       const updatedSettings = { ...providerSettings, ...newSettings };
       
-      // Use existing ID if available, otherwise generate new one
-      const settingsId = providerSettings.id || crypto.randomUUID();
-      
+      // Always upsert using the singleton_key constraint to ensure only one row exists
       const { error } = await supabase
         .from('speaking_evaluation_settings' as any)
         .upsert({
-          id: settingsId,
+          singleton_key: 'default',
           provider: updatedSettings.provider,
           groq_stt_model: updatedSettings.groq_stt_model,
           groq_llm_model: updatedSettings.groq_llm_model,
           gemini_model: updatedSettings.gemini_model,
           auto_fallback_enabled: updatedSettings.auto_fallback_enabled,
           updated_at: new Date().toISOString(),
-        }, { onConflict: 'id' });
+        }, { onConflict: 'singleton_key' });
 
       if (error) throw error;
 
-      setProviderSettings({ ...updatedSettings, id: settingsId });
+      setProviderSettings(updatedSettings);
       toast({
         title: 'Success',
-        description: `Provider switched to ${updatedSettings.provider === 'groq' ? 'Groq (Whisper + Llama)' : 'Gemini'}`,
+        description: `Settings saved: ${updatedSettings.provider === 'groq' ? 'Groq' : 'Gemini'}${updatedSettings.auto_fallback_enabled ? ' with auto-fallback' : ''}`,
       });
     } catch (error: any) {
       console.error('Error saving provider settings:', error);
