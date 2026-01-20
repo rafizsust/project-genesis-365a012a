@@ -762,11 +762,34 @@ async function processTextBasedEvaluation(job: any, supabaseService: any, appEnc
   
   evaluationResult.overall_band = overallBand;
 
-  // Build public audio URLs if available
+  // =========================================================================
+  // ROBUST AUDIO SYNC: Wait for background audio uploads before saving result
+  // =========================================================================
+  // For text-based evaluation, audio is uploaded in background by the client.
+  // Wait briefly to allow uploads to complete, then fetch latest file_paths from job.
+  // This ensures audio URLs are properly included in the result.
+  
+  console.log('[processTextBasedEvaluation] Waiting for background audio uploads to sync...');
+  await sleep(5000); // Wait 5 seconds for background uploads to complete
+  
+  // Re-fetch job to get any updated file_paths from background upload
+  const { data: refreshedJob } = await supabaseService
+    .from('speaking_evaluation_jobs')
+    .select('file_paths')
+    .eq('id', jobId)
+    .single();
+  
+  const latestFilePaths = (refreshedJob?.file_paths && Object.keys(refreshedJob.file_paths).length > 0)
+    ? refreshedJob.file_paths
+    : file_paths;
+  
+  console.log(`[processTextBasedEvaluation] File paths after sync: ${Object.keys(latestFilePaths || {}).length} files`);
+  
+  // Build public audio URLs from latest file_paths
   const publicBase = (Deno.env.get('R2_PUBLIC_URL') || '').replace(/\/$/, '');
   const audioUrls: Record<string, string> = {};
-  if (publicBase && file_paths) {
-    for (const [k, r2Key] of Object.entries(file_paths as Record<string, string>)) {
+  if (publicBase && latestFilePaths) {
+    for (const [k, r2Key] of Object.entries(latestFilePaths as Record<string, string>)) {
       audioUrls[k] = `${publicBase}/${String(r2Key).replace(/^\//, '')}`;
     }
   }
@@ -779,7 +802,7 @@ async function processTextBasedEvaluation(job: any, supabaseService: any, appEnc
     timing: { total: totalTimeMsText },
   };
 
-  // Save result with transcripts included
+  // Save result with transcripts and audio URLs included
   const { data: resultRow, error: saveError } = await supabaseService
     .from('ai_practice_results')
     .insert({
@@ -794,7 +817,7 @@ async function processTextBasedEvaluation(job: any, supabaseService: any, appEnc
       answers: {
         audio_urls: audioUrls,
         transcripts, // Include the rich transcript data (we store input transcripts, not echoed from Gemini)
-        file_paths,
+        file_paths: latestFilePaths,
       },
       evaluation_timing: evaluationTimingText,
       completed_at: new Date().toISOString(),
@@ -907,7 +930,7 @@ JSON OUTPUT:
   "examiner_notes": "1 sentence key area",
   "vocabulary_upgrades": [{"original": "...", "upgraded": "...", "context": "..."}, {"original": "...", "upgraded": "...", "context": "..."}, {"original": "...", "upgraded": "...", "context": "..."}],
   "recognition_corrections": [{"captured": "misheard", "intended": "correct", "context": "sentence"}],
-  "part_analysis": [{"part_number": 1, "performance_notes": "1 sentence", "key_moments": ["1 item"], "areas_for_improvement": ["1 item"]}],
+  "part_analysis": [{"part_number": 1, "performance_notes": "1 sentence", "key_moments": ["max 2"], "areas_for_improvement": ["Issue + example quote from transcript", "Issue + example", "Issue + example"]}],
   "modelAnswers": [
     {
       "segment_key": "${orderedSegments[0]?.key || 'part1-q...'}",
@@ -928,10 +951,11 @@ JSON OUTPUT:
 RULES:
 1. Return EXACTLY ${numSegments} modelAnswers with segment_keys: ${orderedSegments.map(s => s.key).join(', ')}
 2. Model answers: Part1=40w, Part2=140w, Part3=50w
-3. Max 2 items per array
+3. Max 2 items per array (except areas_for_improvement)
 4. Include max 3 vocabulary_upgrades (omit if none needed)
 5. Include max 3 recognition_corrections for speech errors (omit if none)
 6. DO NOT return transcripts_by_part
+7. part_analysis: Include 3+ areas_for_improvement per part, each with SPECIFIC example from candidate's transcript (e.g., "Insufficient length (82 words vs 150 target)", "Frequent hesitations: 'um...uh...'", "Incomplete sentence: 'I was going to...'")
 
 Return ONLY valid JSON.`;
 }
