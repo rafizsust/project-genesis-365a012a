@@ -251,11 +251,19 @@ export type Database = {
           gemini_exp_1206_exhausted_date: string | null
           groq_ash_reset_at: string | null
           groq_ash_used_this_hour: number | null
+          groq_llama_70b_exhausted: boolean | null
+          groq_llama_70b_exhausted_date: string | null
           groq_llama_exhausted: boolean | null
           groq_llama_exhausted_date: string | null
+          groq_llm_requests_minute_start: string | null
+          groq_llm_requests_this_minute: number | null
           groq_rpm_cooldown_until: string | null
+          groq_stt_requests_minute_start: string | null
+          groq_stt_requests_this_minute: number | null
           groq_whisper_exhausted: boolean | null
           groq_whisper_exhausted_date: string | null
+          groq_whisper_v3_turbo_exhausted: boolean | null
+          groq_whisper_v3_turbo_exhausted_date: string | null
           id: string
           is_active: boolean
           key_value: string
@@ -296,11 +304,19 @@ export type Database = {
           gemini_exp_1206_exhausted_date?: string | null
           groq_ash_reset_at?: string | null
           groq_ash_used_this_hour?: number | null
+          groq_llama_70b_exhausted?: boolean | null
+          groq_llama_70b_exhausted_date?: string | null
           groq_llama_exhausted?: boolean | null
           groq_llama_exhausted_date?: string | null
+          groq_llm_requests_minute_start?: string | null
+          groq_llm_requests_this_minute?: number | null
           groq_rpm_cooldown_until?: string | null
+          groq_stt_requests_minute_start?: string | null
+          groq_stt_requests_this_minute?: number | null
           groq_whisper_exhausted?: boolean | null
           groq_whisper_exhausted_date?: string | null
+          groq_whisper_v3_turbo_exhausted?: boolean | null
+          groq_whisper_v3_turbo_exhausted_date?: string | null
           id?: string
           is_active?: boolean
           key_value: string
@@ -341,11 +357,19 @@ export type Database = {
           gemini_exp_1206_exhausted_date?: string | null
           groq_ash_reset_at?: string | null
           groq_ash_used_this_hour?: number | null
+          groq_llama_70b_exhausted?: boolean | null
+          groq_llama_70b_exhausted_date?: string | null
           groq_llama_exhausted?: boolean | null
           groq_llama_exhausted_date?: string | null
+          groq_llm_requests_minute_start?: string | null
+          groq_llm_requests_this_minute?: number | null
           groq_rpm_cooldown_until?: string | null
+          groq_stt_requests_minute_start?: string | null
+          groq_stt_requests_this_minute?: number | null
           groq_whisper_exhausted?: boolean | null
           groq_whisper_exhausted_date?: string | null
+          groq_whisper_v3_turbo_exhausted?: boolean | null
+          groq_whisper_v3_turbo_exhausted_date?: string | null
           id?: string
           is_active?: boolean
           key_value?: string
@@ -1946,28 +1970,52 @@ export type Database = {
           key_value: string
         }[]
       }
-      checkout_groq_key_for_llm: {
-        Args: {
-          p_job_id: string
-          p_lock_duration_seconds?: number
-          p_part_number: number
-        }
-        Returns: {
-          out_key_id: string
-          out_key_value: string
-        }[]
-      }
-      checkout_groq_key_for_stt: {
-        Args: {
-          p_job_id: string
-          p_lock_duration_seconds?: number
-          p_part_number: number
-        }
-        Returns: {
-          out_key_id: string
-          out_key_value: string
-        }[]
-      }
+      checkout_groq_key_for_llm:
+        | {
+            Args: {
+              p_job_id: string
+              p_lock_duration_seconds?: number
+              p_part_number?: number
+            }
+            Returns: {
+              out_key_id: string
+              out_key_value: string
+            }[]
+          }
+        | {
+            Args: {
+              p_job_id: string
+              p_lock_duration_seconds?: number
+              p_part_number: number
+            }
+            Returns: {
+              out_key_id: string
+              out_key_value: string
+            }[]
+          }
+      checkout_groq_key_for_stt:
+        | {
+            Args: {
+              p_job_id: string
+              p_lock_duration_seconds?: number
+              p_part_number?: number
+            }
+            Returns: {
+              out_key_id: string
+              out_key_value: string
+            }[]
+          }
+        | {
+            Args: {
+              p_job_id: string
+              p_lock_duration_seconds?: number
+              p_part_number: number
+            }
+            Returns: {
+              out_key_id: string
+              out_key_value: string
+            }[]
+          }
       checkout_key_for_part: {
         Args: {
           p_job_id: string
@@ -2021,10 +2069,9 @@ export type Database = {
         }
         Returns: undefined
       }
-      mark_groq_key_exhausted: {
-        Args: { p_key_id: string; p_model: string }
-        Returns: undefined
-      }
+      mark_groq_key_exhausted:
+        | { Args: { p_key_id: string; p_model: string }; Returns: undefined }
+        | { Args: { p_key_id: string; p_model: string }; Returns: undefined }
       mark_groq_key_rpm_limited: {
         Args: { p_cooldown_seconds?: number; p_key_id: string }
         Returns: undefined
@@ -2055,6 +2102,10 @@ export type Database = {
         Returns: undefined
       }
       reset_api_key_quotas: { Args: never; Returns: undefined }
+      reset_groq_model_quotas: {
+        Args: { p_key_id?: string }
+        Returns: undefined
+      }
       reset_key_rate_limit: { Args: { p_key_id: string }; Returns: undefined }
       reset_user_api_key_quotas: { Args: never; Returns: undefined }
     }

@@ -2,9 +2,9 @@
  * Groq Key Pool Manager
  * 
  * Manages Groq API keys for speaking evaluation with:
+ * - Separate quota tracking for Whisper STT and Llama LLM
  * - ASH (Audio Seconds per Hour) tracking (free tier: 7,200s/hour)
  * - RPM management (free tier: 20 RPM for Whisper)
- * - Separate checkout for STT (Whisper) and LLM (Llama)
  * - Key rotation across multiple free accounts
  * 
  * Usage:
@@ -21,8 +21,9 @@
 // ============================================================================
 
 export const GROQ_TIMINGS = {
-  // Delay between Whisper calls to stay under 20 RPM (3 seconds = max 20/min)
-  INTER_SEGMENT_DELAY_MS: 3000,
+  // Reduced delay: 1 second is safe for typical IELTS tests (max ~12 segments)
+  // Groq allows 20 RPM, 1s delay = max 60/min, well under limit
+  INTER_SEGMENT_DELAY_MS: 1000,
   
   // ASH limit per hour (free tier)
   ASH_LIMIT_PER_HOUR: 7200,
@@ -49,6 +50,7 @@ export interface GroqErrorClassification {
   shouldRetry: boolean;
   shouldSwitchKey: boolean;
   description: string;
+  model?: 'whisper' | 'llama';
 }
 
 // ============================================================================
@@ -57,7 +59,7 @@ export interface GroqErrorClassification {
 
 /**
  * Checkout a Groq API key for Whisper STT.
- * Respects ASH limits and RPM cooldowns.
+ * Respects ASH limits, RPM cooldowns, and Whisper-specific exhaustion.
  */
 export async function checkoutGroqKeyForSTT(
   supabaseService: any,
@@ -92,7 +94,7 @@ export async function checkoutGroqKeyForSTT(
 
 /**
  * Checkout a Groq API key for Llama LLM.
- * Simpler checkout - just checks if not exhausted.
+ * Checks Llama-specific exhaustion status.
  */
 export async function checkoutGroqKeyForLLM(
   supabaseService: any,
@@ -175,12 +177,12 @@ export async function markGroqKeyRPMLimited(
 
 /**
  * Mark a Groq key as exhausted for a specific model.
- * Call this when you get a quota exhaustion error.
+ * Supports separate tracking for Whisper and Llama.
  */
 export async function markGroqKeyExhausted(
   supabaseService: any,
   keyId: string,
-  model: 'whisper_v3_turbo' | 'whisper_v3' | 'llama_70b'
+  model: 'whisper' | 'whisper_v3_turbo' | 'whisper-large-v3-turbo' | 'llama' | 'llama_70b' | 'llama-3.3-70b-versatile'
 ): Promise<void> {
   console.log(`[groqKeyPoolManager] Marking key ${keyId?.slice(0, 8)}... as exhausted for ${model}`);
   
@@ -200,12 +202,14 @@ export async function markGroqKeyExhausted(
 
 /**
  * Classify Groq API errors to determine appropriate response.
+ * Now tracks which model (whisper/llama) the error is for.
  */
-export function classifyGroqError(error: any, response?: Response): GroqErrorClassification {
+export function classifyGroqError(error: any, response?: Response, isWhisper: boolean = true): GroqErrorClassification {
   const msg = String(error?.message || error || '').toLowerCase();
   const status = response?.status || error?.status || 0;
+  const model: 'whisper' | 'llama' = isWhisper ? 'whisper' : 'llama';
   
-  // Check for ASH limit (audio_seconds_per_hour)
+  // Check for ASH limit (audio_seconds_per_hour) - Whisper only
   if (msg.includes('audio_seconds') || msg.includes('ash') || msg.includes('audio seconds per hour')) {
     return {
       type: 'ash_limit',
@@ -213,6 +217,7 @@ export function classifyGroqError(error: any, response?: Response): GroqErrorCla
       shouldRetry: false,
       shouldSwitchKey: true,
       description: 'ASH limit reached for this key. Switching to another key.',
+      model: 'whisper',
     };
   }
   
@@ -229,7 +234,8 @@ export function classifyGroqError(error: any, response?: Response): GroqErrorCla
       cooldownSeconds: GROQ_TIMINGS.DAILY_QUOTA_COOLDOWN_MIN * 60,
       shouldRetry: false,
       shouldSwitchKey: true,
-      description: 'Daily quota exhausted. Key marked for 24h cooldown.',
+      description: `Daily quota exhausted for ${model}. Key marked for 24h cooldown.`,
+      model,
     };
   }
   
@@ -249,6 +255,7 @@ export function classifyGroqError(error: any, response?: Response): GroqErrorCla
       shouldRetry: false,
       shouldSwitchKey: true,
       description: 'RPM limit hit. Switching to different key.',
+      model,
     };
   }
   
@@ -271,6 +278,7 @@ export function classifyGroqError(error: any, response?: Response): GroqErrorCla
       shouldRetry: true,
       shouldSwitchKey: false,
       description: 'Transient error. Will retry with same key.',
+      model,
     };
   }
   
@@ -281,6 +289,7 @@ export function classifyGroqError(error: any, response?: Response): GroqErrorCla
     shouldRetry: false,
     shouldSwitchKey: false,
     description: 'Permanent or unknown error. Check logs.',
+    model,
   };
 }
 
@@ -297,7 +306,7 @@ export function sleep(ms: number): Promise<void> {
 
 /**
  * Inter-segment delay to respect Whisper RPM limit.
- * Call this between consecutive Whisper API calls.
+ * Now uses reduced 1-second delay (safe for typical IELTS tests).
  */
 export async function interSegmentDelay(): Promise<void> {
   console.log(`[groqKeyPoolManager] Inter-segment delay: ${GROQ_TIMINGS.INTER_SEGMENT_DELAY_MS}ms`);

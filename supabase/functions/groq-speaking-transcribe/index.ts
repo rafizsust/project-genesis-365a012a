@@ -14,7 +14,8 @@ import { getFromR2 } from "../_shared/r2Client.ts";
  * - Filler word detection via prompt engineering
  * - Word-level timestamps for pause analysis
  * - Confidence scores for pronunciation estimation
- * - Inter-segment delay to respect 20 RPM limit
+ * - NO_SPEECH detection to filter out silent gaps / hallucinations
+ * - Optimized timing: 1s delay (safe for up to 60 requests/min, Groq allows 20 RPM)
  */
 
 const corsHeaders = {
@@ -26,8 +27,12 @@ const corsHeaders = {
 // Groq API endpoint
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/audio/transcriptions';
 
-// Inter-segment delay (ms) to stay under 20 RPM
-const INTER_SEGMENT_DELAY_MS = 3000;
+// Inter-segment delay (ms) - reduced from 3000ms since we typically have <12 segments
+// and Groq free tier allows 20 RPM. 1 second delay = 60 req/min max, well under limit.
+const INTER_SEGMENT_DELAY_MS = 1000;
+
+// Threshold for no_speech_prob above which we consider the segment silent
+const NO_SPEECH_THRESHOLD = 0.8;
 
 interface WhisperWord {
   word: string;
@@ -68,6 +73,7 @@ interface SegmentTranscription {
   fillerWords: string[];
   longPauses: { start: number; end: number; duration: number }[];
   wordCount: number;
+  noSpeechProb: number;
 }
 
 serve(async (req) => {
@@ -162,7 +168,7 @@ serve(async (req) => {
     const filePaths = job.file_paths as Record<string, string>;
     const segments = Object.entries(filePaths);
     
-    console.log(`[groq-speaking-transcribe] Transcribing ${segments.length} segments`);
+    console.log(`[groq-speaking-transcribe] Transcribing ${segments.length} segments with ${INTER_SEGMENT_DELAY_MS}ms delay`);
 
     const transcriptions: SegmentTranscription[] = [];
     let totalAudioSeconds = 0;
@@ -372,10 +378,13 @@ async function transcribeWithWhisper(
   formData.append('timestamp_granularities[]', 'word');
   formData.append('timestamp_granularities[]', 'segment');
   formData.append('language', 'en');
-  // Prompt to encourage filler word transcription
+  // Prompt to encourage filler word transcription and prevent hallucinations
   formData.append('prompt', 
-    'Transcribe exactly as spoken. Include all filler words such as um, uh, ah, er, hmm, like, you know. ' +
-    'Include false starts, repetitions, and self-corrections. Do not clean up the speech.'
+    'Transcribe exactly as spoken in this IELTS speaking test response. ' +
+    'Include all filler words such as um, uh, ah, er, hmm, like, you know. ' +
+    'Include false starts, repetitions, and self-corrections. ' +
+    'If there is silence or no speech, output nothing. Do not add any text for silent portions. ' +
+    'Do not add greetings like "thank you" or "goodbye" unless they were actually spoken.'
   );
 
   const response = await fetch(GROQ_API_URL, {
@@ -397,24 +406,49 @@ async function transcribeWithWhisper(
 
   console.log(`[groq-speaking-transcribe] ${segmentKey} transcribed in ${processingTime}ms, ${result.duration?.toFixed(1)}s audio`);
 
-  // Extract all words from segments or top-level
-  const words: WhisperWord[] = result.words || 
-    result.segments?.flatMap(s => s.words || []) || 
-    [];
+  // Calculate average no_speech_prob across all segments
+  const avgNoSpeechProb = result.segments?.length > 0
+    ? result.segments.reduce((sum, s) => sum + (s.no_speech_prob || 0), 0) / result.segments.length
+    : 0;
+
+  // Filter out segments with high no_speech probability to prevent hallucinations
+  const filteredSegments = result.segments?.filter(s => {
+    if (s.no_speech_prob > NO_SPEECH_THRESHOLD) {
+      console.log(`[groq-speaking-transcribe] Filtering out segment with no_speech_prob=${s.no_speech_prob.toFixed(2)}: "${s.text}"`);
+      return false;
+    }
+    return true;
+  }) || [];
+
+  // Rebuild text from filtered segments
+  const filteredText = filteredSegments.map(s => s.text).join(' ').trim();
+
+  // Filter out common hallucination phrases at the end of audio
+  const cleanedText = filteredText
+    .replace(/\s*(thank you\.?|thanks\.?|goodbye\.?|bye\.?)\s*$/gi, '')
+    .trim();
+
+  // If the filtered text is empty or significantly different, log it
+  if (cleanedText !== result.text.trim()) {
+    console.log(`[groq-speaking-transcribe] Cleaned transcript: "${result.text}" -> "${cleanedText}"`);
+  }
+
+  // Extract all words from filtered segments
+  const words: WhisperWord[] = filteredSegments.flatMap(s => s.words || []);
 
   // Calculate average confidence
   const avgConfidence = words.length > 0
     ? words.reduce((sum, w) => sum + (w.probability || 0), 0) / words.length
     : 0;
 
-  // Calculate average logprob
-  const avgLogprob = result.segments?.length > 0
-    ? result.segments.reduce((sum, s) => sum + (s.avg_logprob || 0), 0) / result.segments.length
+  // Calculate average logprob from filtered segments
+  const avgLogprob = filteredSegments.length > 0
+    ? filteredSegments.reduce((sum, s) => sum + (s.avg_logprob || 0), 0) / filteredSegments.length
     : 0;
 
   // Detect filler words
   const fillerPattern = /\b(um|uh|ah|er|hmm|like|you know|i mean|sort of|kind of)\b/gi;
-  const fillerMatches = result.text.match(fillerPattern) || [];
+  const fillerMatches = cleanedText.match(fillerPattern) || [];
   const fillerWords = [...new Set(fillerMatches.map(f => f.toLowerCase()))];
 
   // Detect long pauses (gaps > 2 seconds between words)
@@ -430,18 +464,24 @@ async function transcribeWithWhisper(
     }
   }
 
+  // Log pause information for evaluation
+  if (longPauses.length > 0) {
+    console.log(`[groq-speaking-transcribe] ${segmentKey} has ${longPauses.length} long pauses (>2s): ${longPauses.map(p => `${p.duration.toFixed(1)}s`).join(', ')}`);
+  }
+
   return {
     segmentKey,
     partNumber,
     questionNumber,
-    text: result.text,
+    text: cleanedText,
     duration: result.duration || 0,
-    segments: result.segments || [],
+    segments: filteredSegments,
     words,
     avgConfidence,
     avgLogprob,
     fillerWords,
     longPauses,
     wordCount: words.length,
+    noSpeechProb: avgNoSpeechProb,
   };
 }

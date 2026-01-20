@@ -12,9 +12,9 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
  * 
  * OUTPUT SCHEMA matches Gemini pipeline exactly:
  * - criteria with band/score, feedback, strengths, weaknesses, suggestions
- * - modelAnswers with candidateResponse, modelAnswer, whyItWorks, keyImprovements
- * - lexical_upgrades and vocabulary_upgrades arrays
- * - part_analysis with part_number, performance_notes, key_moments, areas_for_improvement
+ * - modelAnswers for EVERY question with full model answers
+ * - lexical_upgrades and vocabulary_upgrades (5-8 minimum)
+ * - part_analysis for ALL parts (1, 2, 3 if full test)
  * - transcripts_by_part and transcripts_by_question
  */
 
@@ -43,6 +43,7 @@ interface TranscriptionSegment {
   fillerWords: string[];
   longPauses: { start: number; end: number; duration: number }[];
   wordCount: number;
+  noSpeechProb?: number;
 }
 
 serve(async (req) => {
@@ -141,12 +142,19 @@ serve(async (req) => {
 
     const testPayload = (aiTestRow as any)?.payload;
 
+    // Determine which parts exist in the test
+    const partNumbers = [...new Set(transcriptionResult.transcriptions.map(t => t.partNumber))].sort();
+    const isFullTest = partNumbers.length >= 3 || (partNumbers.includes(1) && partNumbers.includes(2) && partNumbers.includes(3));
+    
+    console.log(`[groq-speaking-evaluate] Test parts: ${partNumbers.join(', ')} (Full test: ${isFullTest})`);
+
     // Build evaluation prompt (Gemini-compatible output schema)
     const evaluationPrompt = buildEvaluationPrompt(
       transcriptionResult.transcriptions,
       pronunciationEstimate,
       testPayload,
-      job
+      job,
+      partNumbers
     );
 
     // Call Groq Llama 3.3 70B
@@ -164,7 +172,7 @@ serve(async (req) => {
         messages: [
           {
             role: 'system',
-            content: 'You are a certified IELTS Speaking Examiner with 10+ years of experience. Provide accurate, fair assessments following official IELTS band descriptors. Always respond with valid JSON matching the exact schema requested.'
+            content: 'You are a certified IELTS Speaking Examiner with 10+ years of experience. Provide accurate, fair assessments following official IELTS band descriptors. Always respond with valid JSON matching the exact schema requested. You MUST provide complete responses for ALL questions and ALL parts.'
           },
           {
             role: 'user',
@@ -184,7 +192,7 @@ serve(async (req) => {
       if (llmResponse.status === 429) {
         await supabaseService.rpc('mark_groq_key_exhausted', {
           p_key_id: groqKeyId,
-          p_model: 'llama_70b',
+          p_model: 'llama-3.3-70b-versatile',
         });
         throw new Error('RATE_LIMIT: Groq LLM quota exhausted');
       }
@@ -278,49 +286,97 @@ serve(async (req) => {
 
     console.log(`[groq-speaking-evaluate] Criteria: FC=${criteria.fluency_coherence.band}, LR=${criteria.lexical_resource.band}, GRA=${criteria.grammatical_range.band}, P=${criteria.pronunciation.band} => Overall=${overallBand}`);
 
-    // Extract modelAnswers with full structure
-    const modelAnswers = Array.isArray(evaluation?.modelAnswers) 
-      ? evaluation.modelAnswers.map((m: any) => ({
-          segment_key: m.segment_key || m.segmentKey || '',
-          partNumber: typeof m.partNumber === 'number' ? m.partNumber : (typeof m.part_number === 'number' ? m.part_number : 0),
-          questionNumber: typeof m.questionNumber === 'number' ? m.questionNumber : (typeof m.question_number === 'number' ? m.question_number : 0),
-          question: m.question || m.question_text || '',
-          candidateResponse: m.candidateResponse || m.candidate_response || m.transcript || '',
-          estimatedBand: typeof m.estimatedBand === 'number' ? m.estimatedBand : undefined,
-          targetBand: typeof m.targetBand === 'number' ? m.targetBand : undefined,
-          modelAnswer: m.modelAnswer || m.model_answer || '',
-          whyItWorks: Array.isArray(m.whyItWorks) ? m.whyItWorks : (Array.isArray(m.why_it_works) ? m.why_it_works : []),
-          keyImprovements: Array.isArray(m.keyImprovements) ? m.keyImprovements : (Array.isArray(m.key_improvements) ? m.key_improvements : []),
-        }))
-      : [];
+    // Extract modelAnswers with full structure - ensure we have one for EVERY question
+    const rawModelAnswers = Array.isArray(evaluation?.modelAnswers) ? evaluation.modelAnswers : [];
+    
+    // Map transcription segments to ensure we have a model answer for each
+    const modelAnswers = transcriptionResult.transcriptions.map((t, idx) => {
+      // Find matching model answer from LLM response
+      const match = rawModelAnswers.find((m: any) => 
+        m.segment_key === t.segmentKey || 
+        m.segmentKey === t.segmentKey ||
+        (m.partNumber === t.partNumber && m.questionNumber === t.questionNumber) ||
+        (m.part_number === t.partNumber && m.question_number === t.questionNumber)
+      );
+      
+      const questionText = getQuestionTextFromPayload(testPayload, t.partNumber, t.questionNumber, t.segmentKey);
+      
+      if (match) {
+        return {
+          segment_key: t.segmentKey,
+          partNumber: t.partNumber,
+          questionNumber: t.questionNumber,
+          question: match.question || match.question_text || questionText || '',
+          candidateResponse: match.candidateResponse || match.candidate_response || t.text || '',
+          estimatedBand: typeof match.estimatedBand === 'number' ? match.estimatedBand : undefined,
+          targetBand: typeof match.targetBand === 'number' ? match.targetBand : undefined,
+          modelAnswer: match.modelAnswer || match.model_answer || '',
+          whyItWorks: Array.isArray(match.whyItWorks) ? match.whyItWorks : (Array.isArray(match.why_it_works) ? match.why_it_works : []),
+          keyImprovements: Array.isArray(match.keyImprovements) ? match.keyImprovements : (Array.isArray(match.key_improvements) ? match.key_improvements : []),
+        };
+      }
+      
+      // If no match found, create a placeholder (LLM didn't provide one)
+      console.warn(`[groq-speaking-evaluate] No model answer found for ${t.segmentKey}, using transcript`);
+      return {
+        segment_key: t.segmentKey,
+        partNumber: t.partNumber,
+        questionNumber: t.questionNumber,
+        question: questionText || `Part ${t.partNumber}, Question ${t.questionNumber}`,
+        candidateResponse: t.text,
+        modelAnswer: '',
+        whyItWorks: [],
+        keyImprovements: [],
+      };
+    });
 
-    // Extract lexical_upgrades
-    const lexicalUpgrades = Array.isArray(evaluation?.lexical_upgrades)
-      ? evaluation.lexical_upgrades.map((u: any) => ({
-          original: u.original || '',
-          upgraded: u.upgraded || '',
-          context: u.context || '',
-        }))
-      : [];
+    // Extract lexical_upgrades - ensure minimum of 5
+    const rawLexicalUpgrades = Array.isArray(evaluation?.lexical_upgrades) ? evaluation.lexical_upgrades : [];
+    const lexicalUpgrades = rawLexicalUpgrades.map((u: any) => ({
+      original: u.original || '',
+      upgraded: u.upgraded || '',
+      context: u.context || '',
+    }));
+    
+    if (lexicalUpgrades.length < 5) {
+      console.warn(`[groq-speaking-evaluate] Only ${lexicalUpgrades.length} lexical upgrades provided (expected 5+)`);
+    }
 
     // Extract vocabulary_upgrades (alias)
-    const vocabularyUpgrades = Array.isArray(evaluation?.vocabulary_upgrades)
-      ? evaluation.vocabulary_upgrades.map((u: any) => ({
+    const rawVocabUpgrades = Array.isArray(evaluation?.vocabulary_upgrades) ? evaluation.vocabulary_upgrades : [];
+    const vocabularyUpgrades = rawVocabUpgrades.length > 0
+      ? rawVocabUpgrades.map((u: any) => ({
           original: u.original || '',
           upgraded: u.upgraded || '',
           context: u.context || '',
         }))
       : lexicalUpgrades; // Fallback to lexical_upgrades if not provided
 
-    // Extract part_analysis with full structure
-    const partAnalysis = Array.isArray(evaluation?.part_analysis)
-      ? evaluation.part_analysis.map((p: any) => ({
-          part_number: typeof p.part_number === 'number' ? p.part_number : (typeof p.partNumber === 'number' ? p.partNumber : 0),
-          performance_notes: p.performance_notes || p.performanceNotes || p.comment || '',
-          key_moments: Array.isArray(p.key_moments) ? p.key_moments : (Array.isArray(p.keyMoments) ? p.keyMoments : []),
-          areas_for_improvement: Array.isArray(p.areas_for_improvement) ? p.areas_for_improvement : (Array.isArray(p.areasForImprovement) ? p.areasForImprovement : []),
-        }))
-      : [];
+    // Extract part_analysis - ensure we have analysis for ALL parts present in the test
+    const rawPartAnalysis = Array.isArray(evaluation?.part_analysis) ? evaluation.part_analysis : [];
+    const partAnalysis = partNumbers.map(partNum => {
+      const match = rawPartAnalysis.find((p: any) => 
+        p.part_number === partNum || p.partNumber === partNum
+      );
+      
+      if (match) {
+        return {
+          part_number: partNum,
+          performance_notes: match.performance_notes || match.performanceNotes || match.comment || '',
+          key_moments: Array.isArray(match.key_moments) ? match.key_moments : (Array.isArray(match.keyMoments) ? match.keyMoments : []),
+          areas_for_improvement: Array.isArray(match.areas_for_improvement) ? match.areas_for_improvement : (Array.isArray(match.areasForImprovement) ? match.areasForImprovement : []),
+        };
+      }
+      
+      // If no match found, create a placeholder
+      console.warn(`[groq-speaking-evaluate] No part analysis found for Part ${partNum}`);
+      return {
+        part_number: partNum,
+        performance_notes: `Analysis for Part ${partNum}`,
+        key_moments: [],
+        areas_for_improvement: [],
+      };
+    });
 
     // Build final result matching Gemini schema exactly
     const finalResult = {
@@ -344,6 +400,7 @@ serve(async (req) => {
         processingTimeMs: processingTime,
         transcriptionSegments: transcriptionResult.transcriptions.length,
         totalAudioSeconds: transcriptionResult.totalAudioSeconds,
+        partsCovered: partNumbers,
       },
     };
 
@@ -405,13 +462,15 @@ serve(async (req) => {
       })
       .eq('id', jobId);
 
-    console.log(`[groq-speaking-evaluate] Evaluation complete. Overall band: ${overallBand}`);
+    console.log(`[groq-speaking-evaluate] Evaluation complete. Overall band: ${overallBand}, Parts: ${partNumbers.join(',')}, Questions: ${modelAnswers.length}`);
 
     return new Response(JSON.stringify({
       success: true,
       overallBand,
       processingTimeMs: processingTime,
       resultId: resultRow?.id,
+      partsAnalyzed: partNumbers.length,
+      questionsEvaluated: modelAnswers.length,
     }), {
       status: 200,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -453,7 +512,6 @@ function estimatePronunciation(transcriptions: TranscriptionSegment[]): Pronunci
   const totalWords = transcriptions.reduce((sum, t) => sum + t.wordCount, 0);
   const weightedConfidence = transcriptions.reduce((sum, t) => sum + (t.avgConfidence * t.wordCount), 0) / Math.max(1, totalWords);
   const avgLogprob = transcriptions.reduce((sum, t) => sum + t.avgLogprob, 0) / transcriptions.length;
-  
   const totalFillerWords = transcriptions.reduce((sum, t) => sum + t.fillerWords.length, 0);
   const totalLongPauses = transcriptions.reduce((sum, t) => sum + t.longPauses.length, 0);
   const fillerRatio = totalFillerWords / Math.max(1, totalWords);
@@ -503,11 +561,18 @@ function buildEvaluationPrompt(
   transcriptions: TranscriptionSegment[],
   pronunciationEstimate: PronunciationEstimate,
   testPayload: any,
-  job: any
+  job: any,
+  partNumbers: number[]
 ): string {
   // Build transcript section with metadata
   const transcriptSection = transcriptions.map(t => {
     const questionText = getQuestionTextFromPayload(testPayload, t.partNumber, t.questionNumber, t.segmentKey);
+    
+    // Include pause analysis if there are long pauses
+    const pauseInfo = t.longPauses.length > 0 
+      ? `**Long pauses (>2s):** ${t.longPauses.map(p => `${p.duration.toFixed(1)}s at ${p.start.toFixed(1)}s`).join(', ')}`
+      : '**Long pauses:** none';
+    
     return `
 ## Part ${t.partNumber}, Question ${t.questionNumber}
 **Segment Key:** ${t.segmentKey}
@@ -516,19 +581,58 @@ function buildEvaluationPrompt(
 **Duration:** ${t.duration.toFixed(1)}s | **Words:** ${t.wordCount}
 **Filler words detected:** ${t.fillerWords.length > 0 ? t.fillerWords.join(', ') : 'none'}
 **Recognition confidence:** ${(t.avgConfidence * 100).toFixed(1)}%
-**Long pauses (>2s):** ${t.longPauses.length}
+${pauseInfo}
 `;
   }).join('\n');
 
-  // Build segment keys list for modelAnswers
-  const segmentKeys = transcriptions.map(t => t.segmentKey);
+  // Count total questions and build segment info for modelAnswers requirement
+  const totalQuestions = transcriptions.length;
+  const segmentInfo = transcriptions.map(t => ({
+    segment_key: t.segmentKey,
+    partNumber: t.partNumber,
+    questionNumber: t.questionNumber,
+    question: getQuestionTextFromPayload(testPayload, t.partNumber, t.questionNumber, t.segmentKey) || `Part ${t.partNumber} Q${t.questionNumber}`,
+    transcript: t.text,
+  }));
+
+  // Build part_analysis requirement
+  const partAnalysisRequirement = partNumbers.map(p => `{
+      "part_number": ${p},
+      "performance_notes": "<1-2 sentence assessment of Part ${p}>",
+      "key_moments": ["<positive moment with quote>", "<another positive>"],
+      "areas_for_improvement": ["<issue with quote>", "<another issue>", "<third issue>"]
+    }`).join(',\n    ');
+
+  // Build modelAnswers requirement showing ALL questions
+  const modelAnswersRequirement = segmentInfo.map((s, i) => {
+    const wordTarget = s.partNumber === 2 ? 140 : (s.partNumber === 1 ? 40 : 55);
+    return `{
+      "segment_key": "${s.segment_key}",
+      "partNumber": ${s.partNumber},
+      "questionNumber": ${s.questionNumber},
+      "question": "${s.question}",
+      "candidateResponse": "${s.transcript.slice(0, 100)}...",
+      "estimatedBand": <band for this response>,
+      "targetBand": <estimatedBand + 1>,
+      "modelAnswer": "<FULL ${wordTarget}-word model answer>",
+      "whyItWorks": ["<reason>", "<reason>"],
+      "keyImprovements": ["<improvement>", "<improvement>"]
+    }`;
+  }).join(',\n    ');
 
   return `
 # IELTS Speaking Test Evaluation
 
 ## Instructions
-You are evaluating an IELTS Speaking test. Provide a comprehensive evaluation matching the official IELTS format.
+You are evaluating an IELTS Speaking test with ${totalQuestions} questions across ${partNumbers.length} part(s): ${partNumbers.join(', ')}.
+Provide a comprehensive evaluation matching the official IELTS format.
 The transcripts below were generated from audio recordings using Whisper STT.
+
+**CRITICAL REQUIREMENTS:**
+1. Provide modelAnswers for ALL ${totalQuestions} questions - not just the first one
+2. Provide part_analysis for ALL ${partNumbers.length} parts: ${partNumbers.join(', ')}
+3. Provide at least 5 lexical_upgrades and 5 vocabulary_upgrades
+4. Address pauses and hesitations in your fluency assessment
 
 ## Topic
 ${job.topic || 'General IELTS Speaking'}
@@ -544,39 +648,35 @@ ${transcriptSection}
 **Confidence:** ${pronunciationEstimate.confidence}
 ${pronunciationEstimate.evidence.map(e => `- ${e}`).join('\n')}
 
-## Evaluation Task
+## Response Format
 
-Evaluate the candidate on all four IELTS Speaking criteria. Provide detailed, actionable feedback.
-
-## CRITICAL: Response Format
-
-You MUST return a JSON object with this EXACT structure:
+You MUST return a JSON object with this EXACT structure. Do NOT skip any questions or parts.
 
 {
   "criteria": {
     "fluency_coherence": {
       "band": <number 1-9 in 0.5 increments>,
-      "feedback": "<2-3 sentence detailed feedback>",
-      "strengths": ["<specific strength with example from transcript>", "<another strength>"],
-      "weaknesses": ["<specific weakness with example quote from transcript>", "<another weakness>"],
-      "suggestions": ["<actionable improvement tip>", "<another tip>"]
+      "feedback": "<2-3 sentence feedback addressing pauses, hesitations, and flow>",
+      "strengths": ["<strength with example>", "<strength>"],
+      "weaknesses": ["<weakness with quote from transcript>", "<weakness>"],
+      "suggestions": ["<actionable tip>", "<tip>"]
     },
     "lexical_resource": {
       "band": <number>,
-      "feedback": "<2-3 sentence detailed feedback>",
+      "feedback": "<feedback on vocabulary range and usage>",
       "strengths": ["<strength>"],
       "weaknesses": ["<weakness with example>"],
       "suggestions": ["<tip>"]
     },
     "grammatical_range": {
       "band": <number>,
-      "feedback": "<2-3 sentence detailed feedback>",
+      "feedback": "<feedback on grammar variety and accuracy>",
       "strengths": ["<strength>"],
       "weaknesses": ["<weakness with example>"],
       "suggestions": ["<tip>"]
     },
     "pronunciation": {
-      "band": <number - use ${pronunciationEstimate.estimatedBand} as baseline>,
+      "band": ${pronunciationEstimate.estimatedBand},
       "feedback": "<feedback noting this is estimated from transcription confidence>",
       "strengths": ["<strength>"],
       "weaknesses": ["<weakness>"],
@@ -586,46 +686,38 @@ You MUST return a JSON object with this EXACT structure:
   "summary": "<2-3 sentence overall assessment>",
   "examiner_notes": "<1 sentence on most critical improvement area>",
   "modelAnswers": [
-    {
-      "segment_key": "${segmentKeys[0] || 'part1-q1'}",
-      "partNumber": ${transcriptions[0]?.partNumber || 1},
-      "questionNumber": ${transcriptions[0]?.questionNumber || 1},
-      "question": "<question text>",
-      "candidateResponse": "<cleaned transcript from above>",
-      "estimatedBand": <number - band for this specific response>,
-      "targetBand": <number - realistic target band (estimatedBand + 1)>,
-      "modelAnswer": "<FULL model answer: Part1=40 words, Part2=140 words, Part3=55 words - ALWAYS PROVIDE>",
-      "whyItWorks": ["<reason 1>", "<reason 2>"],
-      "keyImprovements": ["<specific improvement 1>", "<improvement 2>"]
-    }
+    ${modelAnswersRequirement}
   ],
   "lexical_upgrades": [
-    {"original": "<word/phrase from transcript>", "upgraded": "<better alternative>", "context": "<sentence showing usage>"},
+    {"original": "<word from transcript>", "upgraded": "<better word>", "context": "<sentence>"},
+    {"original": "...", "upgraded": "...", "context": "..."},
+    {"original": "...", "upgraded": "...", "context": "..."},
     {"original": "...", "upgraded": "...", "context": "..."},
     {"original": "...", "upgraded": "...", "context": "..."}
   ],
   "vocabulary_upgrades": [
-    {"original": "<basic word>", "upgraded": "<advanced alternative>", "context": "<example sentence>"}
+    {"original": "<basic word>", "upgraded": "<advanced word>", "context": "<example>"},
+    {"original": "...", "upgraded": "...", "context": "..."},
+    {"original": "...", "upgraded": "...", "context": "..."},
+    {"original": "...", "upgraded": "...", "context": "..."},
+    {"original": "...", "upgraded": "...", "context": "..."}
   ],
   "part_analysis": [
-    {
-      "part_number": ${transcriptions[0]?.partNumber || 1},
-      "performance_notes": "<1-2 sentence assessment of this part>",
-      "key_moments": ["<positive moment with quote>", "<another positive>"],
-      "areas_for_improvement": ["<specific issue with quote from transcript>", "<another issue>", "<another issue>"]
-    }
+    ${partAnalysisRequirement}
   ],
-  "improvement_priorities": ["<most important area to improve>", "<second priority>"],
-  "strengths_to_maintain": ["<key strength to keep developing>", "<another strength>"]
+  "improvement_priorities": ["<priority 1>", "<priority 2>"],
+  "strengths_to_maintain": ["<strength 1>", "<strength 2>"]
 }
 
-IMPORTANT RULES:
-1. Provide AT LEAST 3 lexical_upgrades with real examples from the transcript
-2. modelAnswers MUST include a full model answer (not just improvements)
-3. Each criterion MUST have at least 2 strengths, 2 weaknesses, and 2 suggestions
-4. Quote directly from the transcript when giving examples
-5. part_analysis MUST include at least 3 areas_for_improvement with specific examples
-6. Be fair but honest - this is an IELTS evaluation
+**MANDATORY RULES:**
+1. modelAnswers array MUST have exactly ${totalQuestions} entries - one for each question
+2. Each modelAnswer MUST have a FULL model answer (Part 1: ~40 words, Part 2: ~140 words, Part 3: ~55 words)
+3. part_analysis array MUST have exactly ${partNumbers.length} entries for parts: ${partNumbers.join(', ')}
+4. Each part_analysis MUST have at least 3 areas_for_improvement with specific quotes
+5. lexical_upgrades MUST have at least 5 entries with real examples from transcript
+6. vocabulary_upgrades MUST have at least 5 entries
+7. If there are long pauses noted, address them in fluency_coherence feedback
+8. Quote directly from the transcript when giving examples
 
 Be fair, consistent, and follow official IELTS band descriptors.
 `;
