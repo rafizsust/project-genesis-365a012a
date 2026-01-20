@@ -1295,6 +1295,9 @@ export type Database = {
         Row: {
           auto_fallback_enabled: boolean
           created_at: string
+          gemini_model: string | null
+          groq_llm_model: string | null
+          groq_stt_model: string | null
           id: string
           max_groq_retries: number
           provider: string
@@ -1303,6 +1306,9 @@ export type Database = {
         Insert: {
           auto_fallback_enabled?: boolean
           created_at?: string
+          gemini_model?: string | null
+          groq_llm_model?: string | null
+          groq_stt_model?: string | null
           id?: string
           max_groq_retries?: number
           provider?: string
@@ -1311,6 +1317,9 @@ export type Database = {
         Update: {
           auto_fallback_enabled?: boolean
           created_at?: string
+          gemini_model?: string | null
+          groq_llm_model?: string | null
+          groq_stt_model?: string | null
           id?: string
           max_groq_retries?: number
           provider?: string

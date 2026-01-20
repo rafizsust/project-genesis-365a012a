@@ -245,20 +245,8 @@ serve(async (req) => {
   } catch (error: any) {
     console.error('[groq-speaking-evaluate] Error:', error);
 
-    // Update job with error
-    try {
-      const body = await req.clone().json().catch(() => ({}));
-      if (body.jobId) {
-        await supabaseService
-          .from('speaking_evaluation_jobs')
-          .update({
-            last_error: error.message,
-            heartbeat_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', body.jobId);
-      }
-    } catch {}
+    // Note: We can't re-parse req.json() here as body is already consumed.
+    // The job runner watchdog will handle updating the job status.
 
     return new Response(JSON.stringify({ error: error.message }), {
       status: 500,
