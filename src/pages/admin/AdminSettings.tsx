@@ -88,6 +88,7 @@ interface ApiKey {
 }
 
 interface ProviderSettings {
+  id?: string;
   provider: 'gemini' | 'groq';
   groq_stt_model: string;
   groq_llm_model: string;
@@ -107,6 +108,7 @@ export default function AdminSettings() {
   const [addGroqDialogOpen, setAddGroqDialogOpen] = useState(false);
   const [adding, setAdding] = useState(false);
   const [providerSettings, setProviderSettings] = useState<ProviderSettings>({
+    id: undefined,
     provider: 'gemini',
     groq_stt_model: 'whisper-large-v3-turbo',
     groq_llm_model: 'llama-3.3-70b-versatile',
@@ -176,6 +178,7 @@ export default function AdminSettings() {
       if (data) {
         const settingsData = data as any;
         setProviderSettings({
+          id: settingsData.id,
           provider: settingsData.provider as 'gemini' | 'groq',
           groq_stt_model: settingsData.groq_stt_model || 'whisper-large-v3-turbo',
           groq_llm_model: settingsData.groq_llm_model || 'llama-3.3-70b-versatile',
@@ -193,21 +196,24 @@ export default function AdminSettings() {
     try {
       const updatedSettings = { ...providerSettings, ...newSettings };
       
+      // Use existing ID if available, otherwise generate new one
+      const settingsId = providerSettings.id || crypto.randomUUID();
+      
       const { error } = await supabase
         .from('speaking_evaluation_settings' as any)
         .upsert({
-          id: crypto.randomUUID(),
+          id: settingsId,
           provider: updatedSettings.provider,
           groq_stt_model: updatedSettings.groq_stt_model,
           groq_llm_model: updatedSettings.groq_llm_model,
           gemini_model: updatedSettings.gemini_model,
           auto_fallback_enabled: updatedSettings.auto_fallback_enabled,
           updated_at: new Date().toISOString(),
-        });
+        }, { onConflict: 'id' });
 
       if (error) throw error;
 
-      setProviderSettings(updatedSettings);
+      setProviderSettings({ ...updatedSettings, id: settingsId });
       toast({
         title: 'Success',
         description: `Provider switched to ${updatedSettings.provider === 'groq' ? 'Groq (Whisper + Llama)' : 'Gemini'}`,
