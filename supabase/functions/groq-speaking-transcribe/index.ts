@@ -108,6 +108,21 @@ serve(async (req) => {
       });
     }
 
+    // Fetch AI practice test payload so we can correctly map segment keys (which may contain question UUIDs)
+    // to human question numbers/text.
+    const { data: testRow, error: testError } = await supabaseService
+      .from('ai_practice_tests')
+      .select('payload')
+      .eq('id', job.test_id)
+      .maybeSingle();
+
+    if (testError) {
+      console.warn('[groq-speaking-transcribe] Failed to load ai_practice_tests payload for mapping:', testError);
+    }
+
+    const payload = (testRow as any)?.payload;
+    const questionIdToNumber = buildQuestionIdToNumberMap(payload);
+
     // Update job status
     await supabaseService
       .from('speaking_evaluation_jobs')
@@ -171,11 +186,25 @@ serve(async (req) => {
       console.log(`[groq-speaking-transcribe] Processing segment ${i + 1}/${segments.length}: ${segmentKey}`);
 
       try {
-        // Parse segment key (e.g., "part1_q1" or "1-1")
+        // Parse segment key.
+        // We support keys like:
+        // - part2-q<uuid>
+        // - part2-q1
+        // - 2-1
         const partMatch = segmentKey.match(/part(\d+)/i) || segmentKey.match(/^(\d+)-/);
-        const qMatch = segmentKey.match(/q(\d+)/i) || segmentKey.match(/-(\d+)$/);
         const partNumber = partMatch ? parseInt(partMatch[1]) : 1;
-        const questionNumber = qMatch ? parseInt(qMatch[1]) : 1;
+
+        // Prefer UUID-based mapping when available.
+        const qUuidMatch = segmentKey.match(/q([0-9a-f\-]{8,})/i);
+        const qUuid = qUuidMatch?.[1];
+
+        const mappedQuestionNumber = qUuid ? questionIdToNumber[qUuid] : undefined;
+
+        // Fallback to numeric parsing.
+        const qNumMatch = segmentKey.match(/q(\d+)\b/i) || segmentKey.match(/-(\d+)$/);
+        const parsedQuestionNumber = qNumMatch ? parseInt(qNumMatch[1]) : 1;
+
+        const questionNumber = typeof mappedQuestionNumber === 'number' ? mappedQuestionNumber : parsedQuestionNumber;
 
         // Download audio from R2
         const audioBlob = await downloadFromR2(filePath, supabaseService);
@@ -280,6 +309,20 @@ serve(async (req) => {
     });
   }
 });
+
+function buildQuestionIdToNumberMap(payload: any): Record<string, number> {
+  const map: Record<string, number> = {};
+  const parts = Array.isArray(payload?.speakingParts) ? payload.speakingParts : [];
+  for (const p of parts) {
+    const questions = Array.isArray(p?.questions) ? p.questions : [];
+    for (const q of questions) {
+      const id = typeof q?.id === 'string' ? q.id : null;
+      const n = typeof q?.question_number === 'number' ? q.question_number : Number(q?.question_number);
+      if (id && Number.isFinite(n)) map[id] = n;
+    }
+  }
+  return map;
+}
 
 // ============================================================================
 // Helper Functions
