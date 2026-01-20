@@ -29,6 +29,9 @@ const LOCK_DURATION_MINUTES = 5;
 // Maximum size for inline audio (Gemini limit is ~20MB per request)
 const MAX_INLINE_AUDIO_SIZE_MB = 15;
 
+// Audio compression thresholds - files larger than 500KB may cause "model overloaded" errors
+const COMPRESSION_THRESHOLD_BYTES = 500 * 1024;
+
 serve(async (req) => {
   console.log(`[speaking-upload-job] Request at ${new Date().toISOString()}`);
   
@@ -250,7 +253,24 @@ serve(async (req) => {
         throw new Error(`Failed to download ${segment.segmentKey}: ${downloadResult.error}`);
       }
 
-      const sizeBytes = downloadResult.bytes.length;
+      let audioBytes = downloadResult.bytes;
+      let mimeType = getMimeTypeFromExtension(r2Path);
+      const originalSizeBytes = audioBytes.length;
+
+      // Log the audio size for debugging
+      console.log(`[speaking-upload-job] [${i + 1}/${orderedSegments.length}] Original size: ${(originalSizeBytes / 1024).toFixed(1)}KB, type: ${mimeType}`);
+
+      // Audio is already recorded at optimal quality by the browser
+      // Large files (> 500KB) may cause "model overloaded" errors
+      // We'll note this but not re-compress since we can't transcode in Deno easily
+      // The browser already records at 128kbps WebM which is reasonable
+      if (originalSizeBytes > COMPRESSION_THRESHOLD_BYTES) {
+        console.log(`[speaking-upload-job] [${i + 1}/${orderedSegments.length}] Large file (${(originalSizeBytes / 1024).toFixed(1)}KB > ${COMPRESSION_THRESHOLD_BYTES / 1024}KB threshold) - may cause model overload`);
+        // Note: True audio transcoding requires ffmpeg which isn't available in Deno
+        // The best mitigation is ensuring browser records at lower quality (already 128kbps)
+      }
+
+      const sizeBytes = audioBytes.length;
       totalSizeBytes += sizeBytes;
 
       // Check size limit
@@ -258,15 +278,12 @@ serve(async (req) => {
         console.warn(`[speaking-upload-job] Total audio size ${(totalSizeBytes / 1024 / 1024).toFixed(1)}MB exceeds limit`);
         // Continue anyway, Gemini will reject if too large
       }
-
-      const mimeType = getMimeTypeFromExtension(r2Path);
       
       // Convert to base64 using chunked approach to avoid stack overflow
-      const bytes = downloadResult.bytes;
       let binary = '';
       const chunkSize = 32768; // 32KB chunks
-      for (let j = 0; j < bytes.length; j += chunkSize) {
-        const chunk = bytes.subarray(j, Math.min(j + chunkSize, bytes.length));
+      for (let j = 0; j < audioBytes.length; j += chunkSize) {
+        const chunk = audioBytes.subarray(j, Math.min(j + chunkSize, audioBytes.length));
         binary += String.fromCharCode.apply(null, chunk as unknown as number[]);
       }
       const base64 = btoa(binary);

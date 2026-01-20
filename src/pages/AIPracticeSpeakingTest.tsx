@@ -1454,8 +1454,9 @@ export default function AIPracticeSpeakingTest() {
           fluencyFlag,
           cancelExisting: true, // Cancel any existing pending jobs to avoid 429
           evaluationMode, // 'basic' (text-based) or 'accuracy' (audio-based)
-          // Include text-based analysis data for cheaper evaluation (only for basic mode)
-          transcripts: evaluationMode === 'basic' && Object.keys(transcriptData).length > 0 ? transcriptData : undefined,
+          // CRITICAL: ALWAYS include transcripts as fallback for accuracy mode failures
+          // Text-based evaluation can proceed if audio evaluation fails repeatedly
+          transcripts: Object.keys(transcriptData).length > 0 ? transcriptData : undefined,
         },
       });
 

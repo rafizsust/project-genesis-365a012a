@@ -701,35 +701,25 @@ serve(async (req) => {
         
         console.log(`[speaking-evaluate-job] Part ${partToProcess} error, re-queued for IMMEDIATE retry with different key (next stage: ${nextStage})`);
         
-        // CRITICAL FIX: Trigger retry IMMEDIATELY - don't wait for cooldown
+        // CRITICAL FIX: Trigger retry SYNCHRONOUSLY before returning
         // The failed key is on cooldown, but we try with a DIFFERENT key immediately
-        const triggerRetry = async () => {
-          // NO WAIT - trigger immediately with a different key
-          // The failed key has been marked for cooldown, so checkoutKeyForPart will pick a different one
-          
-          // Choose the right function based on whether we're falling back
-          const targetFunction = shouldFallbackToText ? 'process-speaking-job' : 'speaking-evaluate-job';
-          const functionUrl = `${supabaseUrl}/functions/v1/${targetFunction}`;
-          
-          try {
-            await fetch(functionUrl, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${supabaseServiceKey}`,
-              },
-              body: JSON.stringify({ jobId }),
-            });
-            console.log(`[speaking-evaluate-job] Retry triggered IMMEDIATELY via ${targetFunction} (different key will be used)`);
-          } catch (e) {
-            console.warn(`[speaking-evaluate-job] Retry trigger failed:`, e);
-          }
-        };
+        // Choose the right function based on whether we're falling back
+        const targetFunction = shouldFallbackToText ? 'process-speaking-job' : 'speaking-evaluate-job';
+        const functionUrl = `${supabaseUrl}/functions/v1/${targetFunction}`;
         
-        if (typeof EdgeRuntime !== 'undefined' && EdgeRuntime.waitUntil) {
-          EdgeRuntime.waitUntil(triggerRetry());
-        } else {
-          triggerRetry().catch(e => console.error('[speaking-evaluate-job] Background retry failed:', e));
+        // Trigger SYNCHRONOUSLY - wait for the HTTP call to complete
+        try {
+          const retryResponse = await fetch(functionUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${supabaseServiceKey}`,
+            },
+            body: JSON.stringify({ jobId }),
+          });
+          console.log(`[speaking-evaluate-job] Retry triggered via ${targetFunction}, status: ${retryResponse.status}`);
+        } catch (e) {
+          console.warn(`[speaking-evaluate-job] Retry trigger failed, job will be picked up by runner:`, e);
         }
         
         return new Response(JSON.stringify({ 
