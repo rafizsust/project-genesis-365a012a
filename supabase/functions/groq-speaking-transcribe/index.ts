@@ -38,6 +38,11 @@ const NO_SPEECH_THRESHOLD = 0.5;
 // Compression ratio above which segments are likely hallucinations
 const COMPRESSION_RATIO_THRESHOLD = 2.4;
 
+// Threshold for filtering words that appear after long gaps with low confidence
+// Words after 2+ second gaps with confidence < this are likely hallucinations
+const POST_GAP_CONFIDENCE_THRESHOLD = 0.6;
+const GAP_DURATION_THRESHOLD = 2.0; // seconds
+
 // Hallucination patterns - known Whisper v3 artifacts
 const HALLUCINATION_PATTERNS = [
   /[가-힣]/g,              // Korean characters
@@ -57,6 +62,56 @@ const HALLUCINATION_PATTERNS = [
 // Check if text contains hallucination patterns
 function containsHallucinationPatterns(text: string): boolean {
   return HALLUCINATION_PATTERNS.some(pattern => pattern.test(text));
+}
+
+/**
+ * Filters out words that appear after long gaps (2+ seconds) with low confidence.
+ * These are typically Whisper hallucinations that occur during silence.
+ */
+function filterGapHallucinations(words: WhisperWord[]): WhisperWord[] {
+  if (words.length === 0) return words;
+  
+  const filtered: WhisperWord[] = [];
+  let lastValidEnd = 0;
+  
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
+    
+    // First word is always included (unless it's extremely low confidence)
+    if (i === 0) {
+      if (word.probability >= 0.3) {
+        filtered.push(word);
+        lastValidEnd = word.end;
+      } else {
+        console.log(`[groq-speaking-transcribe] Filtering first word (conf=${word.probability.toFixed(2)}): "${word.word}"`);
+      }
+      continue;
+    }
+    
+    // Calculate gap from last valid word
+    const gap = word.start - lastValidEnd;
+    
+    // If gap > 2s and confidence is low, this is likely a hallucination
+    if (gap > GAP_DURATION_THRESHOLD && word.probability < POST_GAP_CONFIDENCE_THRESHOLD) {
+      console.log(`[groq-speaking-transcribe] Filtering post-gap hallucination (gap=${gap.toFixed(1)}s, conf=${word.probability.toFixed(2)}): "${word.word}"`);
+      continue;
+    }
+    
+    // Check for common hallucination words after gaps
+    if (gap > GAP_DURATION_THRESHOLD) {
+      const lowerWord = word.word.toLowerCase().trim();
+      const hallucinationWords = ['thanks', 'thank', 'you', 'bye', 'goodbye', 'subscribe', 'like'];
+      if (hallucinationWords.some(h => lowerWord.includes(h))) {
+        console.log(`[groq-speaking-transcribe] Filtering common hallucination after gap: "${word.word}"`);
+        continue;
+      }
+    }
+    
+    filtered.push(word);
+    lastValidEnd = word.end;
+  }
+  
+  return filtered;
 }
 
 interface WhisperWord {
@@ -452,10 +507,21 @@ async function transcribeWithWhisper(
     : 0;
 
   // Filter out segments with high no_speech probability, high compression ratio, or hallucination patterns
+  // Also apply DYNAMIC threshold for 2-5s silences (more aggressive filtering)
   const filteredSegments = result.segments?.filter(s => {
+    const segmentDuration = (s.end || 0) - (s.start || 0);
+    
+    // Dynamic no_speech threshold based on segment duration
+    // For 2-5 second segments, use stricter threshold to catch more hallucinations
+    let noSpeechThreshold = NO_SPEECH_THRESHOLD;
+    if (segmentDuration >= 2 && segmentDuration <= 5) {
+      noSpeechThreshold = 0.35; // More strict for 2-5s gaps
+      console.log(`[groq-speaking-transcribe] Using strict no_speech threshold (0.35) for ${segmentDuration.toFixed(1)}s segment`);
+    }
+    
     // Filter by no_speech probability
-    if (s.no_speech_prob > NO_SPEECH_THRESHOLD) {
-      console.log(`[groq-speaking-transcribe] Filtering segment (no_speech=${s.no_speech_prob.toFixed(2)}): "${s.text}"`);
+    if (s.no_speech_prob > noSpeechThreshold) {
+      console.log(`[groq-speaking-transcribe] Filtering segment (no_speech=${s.no_speech_prob.toFixed(2)}, threshold=${noSpeechThreshold}): "${s.text}"`);
       return false;
     }
     
@@ -468,6 +534,13 @@ async function transcribeWithWhisper(
     // Filter by hallucination patterns (non-English, known artifacts)
     if (containsHallucinationPatterns(s.text)) {
       console.log(`[groq-speaking-transcribe] Filtering segment (hallucination pattern): "${s.text}"`);
+      return false;
+    }
+    
+    // Additional check: very short text in longer segments is suspicious
+    const wordCount = (s.text?.split(/\s+/) || []).length;
+    if (segmentDuration > 3 && wordCount <= 2 && s.no_speech_prob > 0.2) {
+      console.log(`[groq-speaking-transcribe] Filtering suspicious short segment (${wordCount}w in ${segmentDuration.toFixed(1)}s): "${s.text}"`);
       return false;
     }
     
@@ -488,7 +561,16 @@ async function transcribeWithWhisper(
   }
 
   // Extract all words from filtered segments
-  const words: WhisperWord[] = filteredSegments.flatMap(s => s.words || []);
+  let words: WhisperWord[] = filteredSegments.flatMap(s => s.words || []);
+
+  // Apply word-gap hallucination filter - removes low-confidence words after 2+ second gaps
+  words = filterGapHallucinations(words);
+
+  // Log if words were filtered
+  const originalWordCount = filteredSegments.reduce((sum, s) => sum + (s.words?.length || 0), 0);
+  if (words.length < originalWordCount) {
+    console.log(`[groq-speaking-transcribe] Filtered ${originalWordCount - words.length} post-gap hallucination words`);
+  }
 
   // Calculate average confidence
   const avgConfidence = words.length > 0

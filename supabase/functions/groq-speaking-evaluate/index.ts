@@ -26,22 +26,21 @@ const corsHeaders = {
 
 const GROQ_LLM_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
+// Llama 4 Scout has 30K TPM (2.5x more than llama-3.3-70b-versatile's 12K TPM)
+const GROQ_LLM_MODEL = 'meta-llama/llama-4-scout-17b-16e-instruct';
+
 async function callGroqLLMWithTokenFallback(opts: {
   apiKey: string;
   prompt: string;
   maxTokensCandidates: number[];
 }) {
-  const system = `You are a CERTIFIED SENIOR IELTS Speaking Examiner with 10+ years of experience.
-
-CRITICAL RULES:
-1. Provide accurate, fair assessments following official IELTS band descriptors
-2. ALWAYS respond with valid JSON matching the EXACT schema requested
-3. Provide COMPLETE responses for ALL questions - never skip or duplicate
-4. Each question gets its OWN unique model answer with the CORRECT transcript
-5. Apply STRICT scoring: short/off-topic responses get Band 2-4, NOT Band 5+
-6. EVERY weakness must include a direct quote example from the transcript
-
-DO NOT duplicate answers. Each segment_key corresponds to ONE unique response.`;
+  // Compact system prompt to save tokens
+  const system = `You are a CERTIFIED IELTS Speaking Examiner. RULES:
+1. Valid JSON only matching the requested schema
+2. COMPLETE responses for ALL questions - no skips/duplicates
+3. Each segment_key = ONE unique model answer with its OWN transcript
+4. STRICT scoring: short/off-topic = Band 2-4 MAX
+5. EVERY weakness needs a quote example from transcript`;
 
   let lastResponse: Response | null = null;
   for (const maxTokens of opts.maxTokensCandidates) {
@@ -52,7 +51,7 @@ DO NOT duplicate answers. Each segment_key corresponds to ONE unique response.`;
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
+        model: GROQ_LLM_MODEL,
         messages: [
           { role: 'system', content: system },
           { role: 'user', content: opts.prompt },
@@ -206,14 +205,14 @@ serve(async (req) => {
       partNumbers
     );
 
-    // Call Groq Llama 3.3 70B
-    console.log(`[groq-speaking-evaluate] Calling Llama 3.3 70B...`);
+    // Call Groq Llama 4 Scout (30K TPM - 2.5x more than Llama 3.3's 12K)
+    console.log(`[groq-speaking-evaluate] Calling ${GROQ_LLM_MODEL}...`);
     const startTime = Date.now();
 
     const llmResponse = await callGroqLLMWithTokenFallback({
       apiKey: groqApiKey,
       prompt: evaluationPrompt,
-      maxTokensCandidates: [8192, 6144],  // Reduced for reliable Groq output
+      maxTokensCandidates: [12000, 10000, 8192],  // Increased for Llama 4 Scout's 30K TPM
     });
 
     if (!llmResponse.ok) {
@@ -223,7 +222,7 @@ serve(async (req) => {
       if (llmResponse.status === 429) {
         await supabaseService.rpc('mark_groq_key_exhausted', {
           p_key_id: groqKeyId,
-          p_model: 'llama-3.3-70b-versatile',
+          p_model: GROQ_LLM_MODEL,
         });
         throw new Error('RATE_LIMIT: Groq LLM quota exhausted');
       }
@@ -420,7 +419,7 @@ serve(async (req) => {
       evaluationMetadata: {
         provider: 'groq',
         sttModel: 'whisper-large-v3-turbo',
-        llmModel: 'llama-3.3-70b-versatile',
+        llmModel: GROQ_LLM_MODEL,
         pronunciationEstimation: pronunciationEstimate,
         processingTimeMs: processingTime,
         transcriptionSegments: transcriptionResult.transcriptions.length,
@@ -589,176 +588,42 @@ function buildEvaluationPrompt(
   job: any,
   partNumbers: number[]
 ): string {
-  // Build transcript section with metadata
+  // Build COMPACT transcript section - removed redundant metadata to save ~1000 tokens
   const transcriptSection = transcriptions.map(t => {
     const questionText = getQuestionTextFromPayload(testPayload, t.partNumber, t.questionNumber, t.segmentKey);
-    
-    // Include pause analysis if there are long pauses
-    const pauseInfo = t.longPauses.length > 0 
-      ? `**Long pauses (>2s):** ${t.longPauses.map(p => `${p.duration.toFixed(1)}s at ${p.start.toFixed(1)}s`).join(', ')}`
-      : '**Long pauses:** none';
-    
-    return `
-## Part ${t.partNumber}, Question ${t.questionNumber}
-**Segment Key:** ${t.segmentKey}
-**Question:** ${questionText || 'N/A'}
-**Transcript:** "${t.text}"
-**Duration:** ${t.duration.toFixed(1)}s | **Words:** ${t.wordCount}
-**Filler words detected:** ${t.fillerWords.length > 0 ? t.fillerWords.join(', ') : 'none'}
-**Recognition confidence:** ${(t.avgConfidence * 100).toFixed(1)}%
-${pauseInfo}
-`;
+    const pauseCount = t.longPauses.length;
+    // Compact format: only essential info
+    return `[P${t.partNumber}Q${t.questionNumber}|${t.segmentKey}] Q:"${questionText || 'N/A'}" T:"${t.text}" (${t.wordCount}w/${t.duration.toFixed(0)}s${pauseCount > 0 ? `/${pauseCount}pauses` : ''})`;
   }).join('\n');
 
-  // Count total questions and build segment info for modelAnswers requirement
   const totalQuestions = transcriptions.length;
-  const segmentInfo = transcriptions.map(t => {
-    const questionText = getQuestionTextFromPayload(testPayload, t.partNumber, t.questionNumber, t.segmentKey);
-    return {
-      segment_key: t.segmentKey,
-      partNumber: t.partNumber,
-      questionNumber: t.questionNumber,
-      question: questionText || `Part ${t.partNumber} Question ${t.questionNumber}`,
-      transcript: t.text,
-    };
-  });
+  
+  // Build COMPACT modelAnswers requirement - removed whyItWorks to save tokens
+  const modelAnswersReq = transcriptions.map(t => {
+    const limits = t.partNumber === 2 ? { min: 150, max: 180 } : t.partNumber === 3 ? { min: 60, max: 80 } : { min: 35, max: 50 };
+    return `{"segment_key":"${t.segmentKey}","partNumber":${t.partNumber},"questionNumber":${t.questionNumber},"estimatedBand":<1-9>,"modelAnswer":"<${limits.min}-${limits.max}w>","keyImprovements":["<1 tip>"]}`;
+  }).join(',');
 
-  // STRICT word limits for model answers - reduced to optimize token usage
-  // Part 2 must be at least 150 words (IELTS long turn requirement)
-  const modelAnswerWordLimits: Record<number, { min: number; max: number; target: number }> = {
-    1: { min: 35, max: 50, target: 40 },
-    2: { min: 150, max: 180, target: 165 },
-    3: { min: 60, max: 80, target: 70 },
-  };
+  // Optimized prompt: ~40% smaller than original
+  return `IELTS Speaking Evaluation - Return valid JSON only.
 
-  // Build modelAnswers requirement showing ALL questions with strict word counts
-  // Removed whyItWorks to save tokens - focus on modelAnswer and keyImprovements
-  const modelAnswersRequirement = segmentInfo.map((s) => {
-    const limits = modelAnswerWordLimits[s.partNumber] || { target: 50, min: 30, max: 60 };
-    const wordTarget = limits.target;
-    return `{
-      "segment_key": "${s.segment_key}",
-      "partNumber": ${s.partNumber},
-      "questionNumber": ${s.questionNumber},
-      "estimatedBand": <band 1.0-9.0>,
-      "modelAnswer": "<COMPLETE ${wordTarget}-word model answer - MUST be ${limits.min}-${limits.max} words>",
-      "keyImprovements": ["<main improvement from their answer>"]
-    }`;
-  }).join(',\n    ');
+CONTEXT: Topic:${job.topic || 'General'} | Difficulty:${job.difficulty || 'Standard'} | Parts:${partNumbers.join(',')} | Questions:${totalQuestions}
 
-  return `You are a CERTIFIED SENIOR IELTS Speaking Examiner with 10+ years of experience.
-Return ONLY valid JSON matching the exact schema below.
+SCORING RULES:
+- Off-topic/irrelevant→Band 2.5-3.5 | Very short(<10w)→Band 2-3 | Nonsense→Band 1.5-2.5 | Silent→Band 1-2
+- EVERY weakness MUST have quote: "[Issue] (e.g., '[quote]')"
 
-══════════════════════════════════════════════════════════════
-CONTEXT
-══════════════════════════════════════════════════════════════
-Topic: ${job.topic || 'General IELTS Speaking'}
-Difficulty: ${job.difficulty || 'Standard'}
-Parts covered: ${partNumbers.join(', ')}
-Total questions: ${totalQuestions}
+MODEL ANSWER LENGTHS: P1:35-50w | P2:150+w MANDATORY | P3:60-80w
 
-══════════════════════════════════════════════════════════════
-🚨 TOKEN PRIORITY ORDER (CRITICAL) 🚨
-══════════════════════════════════════════════════════════════
-1. NEVER truncate Part 2 modelAnswer (150+ words MANDATORY)
-2. Complete ALL modelAnswers with required word counts
-3. Complete criteria feedback with examples in weaknesses
-4. Skip part_notes if not needed
-5. Reduce lexical_upgrades to 3 items if needed
-
-══════════════════════════════════════════════════════════════
-🚨 SCORING FOR INADEQUATE RESPONSES 🚨
-══════════════════════════════════════════════════════════════
-
-Apply STRICT penalties for responses that are:
-- OFF-TOPIC or IRRELEVANT → Band 2.5-3.5 MAX
-- Extremely SHORT (under 10 words) → Band 2.0-3.0 MAX
-- REPETITIVE NONSENSE → Band 1.5-2.5 MAX
-- Single word or "[NO SPEECH]" → Band 1.0-2.0 MAX
-
-══════════════════════════════════════════════════════════════
-🚨 EVERY WEAKNESS MUST HAVE AN EXAMPLE 🚨
-══════════════════════════════════════════════════════════════
-
-MANDATORY FORMAT: "[Issue] (e.g., '[exact quote from transcript]')"
-
-❌ INVALID: "Some grammar errors"
-✅ VALID: "Subject-verb agreement errors (e.g., 'the people goes')"
-
-If no example exists, DO NOT include that weakness.
-
-══════════════════════════════════════════════════════════════
-🚨 MODEL ANSWER WORD LIMITS 🚨
-══════════════════════════════════════════════════════════════
-
-Part 1: 35-50 words | Part 2: 150+ words (MANDATORY) | Part 3: 60-80 words
-
-══════════════════════════════════════════════════════════════
-TRANSCRIPTION DATA
-══════════════════════════════════════════════════════════════
+TRANSCRIPTS:
 ${transcriptSection}
 
-══════════════════════════════════════════════════════════════
-PRONUNCIATION ESTIMATION
-══════════════════════════════════════════════════════════════
-Estimated Band: ${pronunciationEstimate.estimatedBand} (${pronunciationEstimate.confidence})
+PRONUNCIATION: Band ${pronunciationEstimate.estimatedBand} (${pronunciationEstimate.confidence})
 
-══════════════════════════════════════════════════════════════
-OUTPUT JSON SCHEMA
-══════════════════════════════════════════════════════════════
+OUTPUT:
+{"criteria":{"fluency_coherence":{"band":<1-9>,"feedback":"<2 sent>","strengths":[""],"weaknesses":["<with quote>"],"suggestions":[""]},"lexical_resource":{"band":<>,"feedback":"","strengths":[""],"weaknesses":["<with quote>"],"suggestions":[""]},"grammatical_range":{"band":<>,"feedback":"","strengths":[""],"weaknesses":["<with quote>"],"suggestions":[""]},"pronunciation":{"band":${pronunciationEstimate.estimatedBand},"feedback":"","strengths":[""],"weaknesses":[""],"suggestions":[""]}},"summary":"<2 sent>","examiner_notes":"<1 sent>","modelAnswers":[${modelAnswersReq}],"lexical_upgrades":[{"original":"","upgraded":"","context":""},{"original":"","upgraded":"","context":""},{"original":"","upgraded":"","context":""}],"part_notes":[],"improvement_priorities":["",""],"strengths_to_maintain":[""]}
 
-{
-  "criteria": {
-    "fluency_coherence": {
-      "band": <1.0-9.0>,
-      "feedback": "<2 sentences>",
-      "strengths": ["<strength>"],
-      "weaknesses": ["<MUST include quote example>"],
-      "suggestions": ["<tip>"]
-    },
-    "lexical_resource": {
-      "band": <number>,
-      "feedback": "<2 sentences>",
-      "strengths": ["<strength>"],
-      "weaknesses": ["<MUST include quote example>"],
-      "suggestions": ["<tip>"]
-    },
-    "grammatical_range": {
-      "band": <number>,
-      "feedback": "<2 sentences>",
-      "strengths": ["<strength>"],
-      "weaknesses": ["<MUST include quote example>"],
-      "suggestions": ["<tip>"]
-    },
-    "pronunciation": {
-      "band": ${pronunciationEstimate.estimatedBand},
-      "feedback": "<1 sentence>",
-      "strengths": ["<strength>"],
-      "weaknesses": ["<based on transcription confidence>"],
-      "suggestions": ["<tip>"]
-    }
-  },
-  "summary": "<2-3 sentence assessment>",
-  "examiner_notes": "<1 sentence critical improvement>",
-  "modelAnswers": [
-    ${modelAnswersRequirement}
-  ],
-  "lexical_upgrades": [
-    {"original": "<word>", "upgraded": "<better>", "context": "<usage>"},
-    {"original": "...", "upgraded": "...", "context": "..."},
-    {"original": "...", "upgraded": "...", "context": "..."}
-  ],
-  "part_notes": [],
-  "improvement_priorities": ["<top priority>", "<second>"],
-  "strengths_to_maintain": ["<key strength>"]
-}
-
-NOTES:
-- "part_notes" is OPTIONAL: only include if critical issue (e.g., very short response, off-topic)
-  Example: [{"part": 2, "note": "Response only 15 words"}]
-- Verify Part 2 modelAnswer is AT LEAST 150 words before outputting
-- Each modelAnswer must use correct transcript (no duplicates)
-`;
+CRITICAL: Part 2 modelAnswer MUST be 150+ words. No duplicates. Each segment_key = unique response.`;
 }
 
 function getQuestionTextFromPayload(payload: any, partNumber: number, questionNumber: number, segmentKey: string): string {
