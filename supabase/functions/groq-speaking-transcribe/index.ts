@@ -39,9 +39,15 @@ const NO_SPEECH_THRESHOLD = 0.5;
 const COMPRESSION_RATIO_THRESHOLD = 2.4;
 
 // Threshold for filtering words that appear after long gaps with low confidence
-// Words after 2+ second gaps with confidence < this are likely hallucinations
-const POST_GAP_CONFIDENCE_THRESHOLD = 0.6;
-const GAP_DURATION_THRESHOLD = 2.0; // seconds
+// CONSERVATIVE: Only filter truly suspicious words after very long gaps
+// Raised gap to 4s and lowered confidence to 0.35 to preserve legitimate speech after pauses
+// User testing showed 3-second pauses + "I believe" were being wrongly filtered
+const POST_GAP_CONFIDENCE_THRESHOLD = 0.35;
+const GAP_DURATION_THRESHOLD = 4.0; // seconds - increased from 2.0 to avoid filtering speech after normal pauses
+
+// How many words after a gap to protect from aggressive filtering
+// First 3 words after resuming speech often have lower confidence at transition points
+const POST_GAP_PROTECTED_WORDS = 3;
 
 // Hallucination patterns - known Whisper/Distil-Whisper artifacts
 const HALLUCINATION_PATTERNS = [
@@ -153,6 +159,8 @@ function filterGapHallucinations(words: WhisperWord[]): WhisperWord[] {
   
   const filtered: WhisperWord[] = [];
   let lastValidEnd = 0;
+  let wordsAfterGap = 0; // Track how many words since last gap
+  let inPostGapProtection = false; // Are we in the protection window?
   
   for (let i = 0; i < words.length; i++) {
     const word = words[i];
@@ -160,7 +168,7 @@ function filterGapHallucinations(words: WhisperWord[]): WhisperWord[] {
     
     // First word is always included (unless it's extremely low confidence)
     if (i === 0) {
-      if (prob >= 0.3) {
+      if (prob >= 0.25) { // Lowered from 0.3 to be more permissive
         filtered.push(word);
         lastValidEnd = word.end;
       } else {
@@ -172,16 +180,53 @@ function filterGapHallucinations(words: WhisperWord[]): WhisperWord[] {
     // Calculate gap from last valid word
     const gap = word.start - lastValidEnd;
     
-    // If gap > 2s and confidence is low, this is likely a hallucination
+    // Detect if we just crossed a significant gap
+    if (gap > GAP_DURATION_THRESHOLD) {
+      inPostGapProtection = true;
+      wordsAfterGap = 0;
+      console.log(`[groq-speaking-transcribe] Detected ${gap.toFixed(1)}s gap, entering protection mode for next ${POST_GAP_PROTECTED_WORDS} words`);
+    }
+    
+    // Track words after gap for protection
+    if (inPostGapProtection) {
+      wordsAfterGap++;
+      if (wordsAfterGap > POST_GAP_PROTECTED_WORDS) {
+        inPostGapProtection = false;
+      }
+    }
+    
+    // PROTECTED: First N words after a gap are only filtered if VERY low confidence
+    // This prevents filtering legitimate speech like "I believe" after a pause
+    if (inPostGapProtection && wordsAfterGap <= POST_GAP_PROTECTED_WORDS) {
+      // Only filter if extremely low confidence (likely true hallucination)
+      if (prob < 0.2) {
+        console.log(`[groq-speaking-transcribe] Filtering protected post-gap word (extremely low conf=${prob.toFixed(2)}): "${word.word}"`);
+        continue;
+      }
+      // Check for obvious hallucination words even in protection
+      const lowerWord = word.word.toLowerCase().trim();
+      const obviousHallucinations = ['subscribe', 'bye', 'goodbye'];
+      if (obviousHallucinations.some(h => lowerWord.includes(h))) {
+        console.log(`[groq-speaking-transcribe] Filtering obvious hallucination in protection: "${word.word}"`);
+        continue;
+      }
+      // Otherwise, keep the word (protected)
+      filtered.push(word);
+      lastValidEnd = word.end;
+      continue;
+    }
+    
+    // UNPROTECTED: Apply normal gap filtering (only for words AFTER the protection window)
     if (gap > GAP_DURATION_THRESHOLD && prob < POST_GAP_CONFIDENCE_THRESHOLD) {
       console.log(`[groq-speaking-transcribe] Filtering post-gap hallucination (gap=${gap.toFixed(1)}s, conf=${prob.toFixed(2)}): "${word.word}"`);
       continue;
     }
     
-    // Check for common hallucination words after gaps
+    // Check for common hallucination words after gaps (not in protection)
     if (gap > GAP_DURATION_THRESHOLD) {
       const lowerWord = word.word.toLowerCase().trim();
-      const hallucinationWords = ['thanks', 'thank', 'you', 'bye', 'goodbye', 'subscribe', 'like'];
+      const hallucinationWords = ['thanks', 'thank', 'subscribe', 'bye', 'goodbye'];
+      // Removed 'you' and 'like' - these are too common in legitimate speech
       if (hallucinationWords.some(h => lowerWord.includes(h))) {
         console.log(`[groq-speaking-transcribe] Filtering common hallucination after gap: "${word.word}"`);
         continue;
