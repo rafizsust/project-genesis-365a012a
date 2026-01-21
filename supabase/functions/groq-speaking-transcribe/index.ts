@@ -3,7 +3,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { getFromR2 } from "../_shared/r2Client.ts";
 
 /**
- * DUAL-WHISPER TRANSCRIPTION ENGINE v2.0
+ * DUAL-WHISPER TRANSCRIPTION ENGINE v2.1
  * 
  * Production-grade transcription using BOTH Groq Whisper models:
  * - whisper-large-v3: Better vocabulary accuracy
@@ -11,6 +11,14 @@ import { getFromR2 } from "../_shared/r2Client.ts";
  * 
  * The engine runs both models and intelligently merges results based on
  * agreement, hallucination detection, and validation rules.
+ * 
+ * v2.1 Changes:
+ * - Two separate API keys for V3 and Turbo to avoid rate limits
+ * - Parallel model calls when keys are different
+ * - Sequential calls with 300ms delay when keys are same
+ * - Empty text validation for failure detection
+ * - Completeness offset detection for missing first sentences
+ * - Better merge logic for more complete transcripts
  * 
  * NO browser transcripts are used - they are too unreliable.
  */
@@ -28,7 +36,8 @@ const corsHeaders = {
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/audio/transcriptions';
 const WHISPER_V3 = 'whisper-large-v3';
 const WHISPER_TURBO = 'whisper-large-v3-turbo';
-const INTER_SEGMENT_DELAY_MS = 500; // Delay between segments
+const INTER_SEGMENT_DELAY_MS = 1000; // Increased delay between segments
+const INTER_MODEL_DELAY_MS = 300; // Delay between model calls when using same key
 
 // If Turbo repeatedly fails within a job, stop calling it to reduce errors/cost.
 const TURBO_FAILURE_DISABLE_THRESHOLD = 2;
@@ -221,8 +230,10 @@ async function callWhisperAPI(
         ? 'wav'
         : 'webm';
 
+    // Updated prompt with critical instruction to not skip beginning
     const prompt = `Verbatim English transcription of an IELTS speaking test response.
 Rules:
+- CRITICAL: Start transcribing from the VERY FIRST syllable. Do NOT skip the beginning.
 - Transcribe EXACTLY what is spoken, word for word
 - Include filler words: um, uh, er, like, you know, I mean
 - Include false starts and self-corrections
@@ -249,7 +260,7 @@ Rules:
       const errorText = await response.text();
       const snippet = errorText?.slice(0, 300);
 
-      console.warn(`[DualWhisper] ${model} HTTP ${response.status}: ${snippet}`);
+      console.error(`[DualWhisper] ${model} HTTP ${response.status}: ${snippet}`);
 
       // Retry on 5xx errors
       if (response.status >= 500 && retryCount < MAX_RETRIES) {
@@ -266,6 +277,13 @@ Rules:
     }
 
     const result = await response.json();
+    
+    // Validate: if Whisper returns empty text, treat as failure
+    if (!result.text || result.text.trim().length === 0) {
+      console.warn(`[DualWhisper] ${model} returned empty text - treating as failure`);
+      return { ok: false, message: `${model} returned empty text`, bodySnippet: 'Empty response' };
+    }
+    
     return { ok: true, result };
   } catch (err) {
     // Bubble up rate limits (we handle key cooldowns upstream)
@@ -273,7 +291,7 @@ Rules:
       throw err;
     }
 
-    console.warn(`[DualWhisper] ${model} exception:`, err);
+    console.error(`[DualWhisper] ${model} exception:`, err);
     if (retryCount < MAX_RETRIES) {
       await new Promise(r => setTimeout(r, 1000 * (retryCount + 1)));
       return callWhisperAPI(audioBlob, apiKey, model, retryCount + 1);
@@ -435,6 +453,41 @@ function validateWordCount(text: string, audioDurationSeconds: number): { isVali
   return { isValid: true, issue: null };
 }
 
+/**
+ * Check if one transcript contains the other's start later in the text.
+ * This detects if one model skipped the beginning.
+ * Returns 'v3' if V3 is more complete, 'turbo' if Turbo is more complete, or null if unclear.
+ */
+function checkCompletenessOffset(v3Text: string, turboText: string): 'v3' | 'turbo' | null {
+  const v3Words = v3Text.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+  const turboWords = turboText.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+  
+  if (v3Words.length < 5 || turboWords.length < 5) return null;
+  
+  // Get first 5 meaningful words from each
+  const v3Start = v3Words.slice(0, 5).join(' ');
+  const turboStart = turboWords.slice(0, 5).join(' ');
+  
+  const turboFull = turboWords.join(' ');
+  const v3Full = v3Words.join(' ');
+  
+  // Check if V3's start appears later in Turbo's text (V3 skipped beginning)
+  const v3StartInTurbo = turboFull.indexOf(v3Start);
+  if (v3StartInTurbo > 15) {
+    console.log(`[DualWhisper] V3 start found at offset ${v3StartInTurbo} in Turbo - Turbo is more complete`);
+    return 'turbo';
+  }
+  
+  // Check if Turbo's start appears later in V3's text (Turbo skipped beginning)
+  const turboStartInV3 = v3Full.indexOf(turboStart);
+  if (turboStartInV3 > 15) {
+    console.log(`[DualWhisper] Turbo start found at offset ${turboStartInV3} in V3 - V3 is more complete`);
+    return 'v3';
+  }
+  
+  return null;
+}
+
 // =============================================================================
 // AGREEMENT CALCULATION (LCS-based)
 // =============================================================================
@@ -478,21 +531,40 @@ function calculateAgreement(text1: string, text2: string): number {
 
 async function dualWhisperTranscribe(
   audioBlob: Blob,
-  apiKey: string,
+  v3ApiKey: string,
+  turboApiKey: string,
   segmentKey: string,
   options?: { disableTurbo?: boolean }
 ): Promise<DualWhisperResult> {
   const issues: string[] = [];
   let duration = 0;
 
-  // Call models (Turbo optional)
   const disableTurbo = Boolean(options?.disableTurbo);
-  console.log(`[DualWhisper] ${segmentKey}: Calling models (turbo=${disableTurbo ? 'disabled' : 'enabled'})...`);
+  const sameKey = v3ApiKey === turboApiKey;
+  
+  console.log(`[DualWhisper] ${segmentKey}: Calling models (turbo=${disableTurbo ? 'disabled' : 'enabled'}, sameKey=${sameKey})...`);
 
-  const [v3Call, turboCall] = await Promise.all([
-    callWhisperAPI(audioBlob, apiKey, WHISPER_V3),
-    disableTurbo ? Promise.resolve<WhisperCallResult>({ ok: false, message: 'turbo disabled' }) : callWhisperAPI(audioBlob, apiKey, WHISPER_TURBO),
-  ]);
+  let v3Call: WhisperCallResult;
+  let turboCall: WhisperCallResult;
+
+  if (disableTurbo) {
+    // Only call V3
+    v3Call = await callWhisperAPI(audioBlob, v3ApiKey, WHISPER_V3);
+    turboCall = { ok: false, message: 'turbo disabled' };
+  } else if (sameKey) {
+    // Sequential calls with delay when using same key
+    console.log(`[DualWhisper] ${segmentKey}: Same key - calling V3 first, then Turbo with ${INTER_MODEL_DELAY_MS}ms delay`);
+    v3Call = await callWhisperAPI(audioBlob, v3ApiKey, WHISPER_V3);
+    await new Promise(r => setTimeout(r, INTER_MODEL_DELAY_MS));
+    turboCall = await callWhisperAPI(audioBlob, turboApiKey, WHISPER_TURBO);
+  } else {
+    // Parallel calls when using different keys
+    console.log(`[DualWhisper] ${segmentKey}: Different keys - calling models in parallel`);
+    [v3Call, turboCall] = await Promise.all([
+      callWhisperAPI(audioBlob, v3ApiKey, WHISPER_V3),
+      callWhisperAPI(audioBlob, turboApiKey, WHISPER_TURBO),
+    ]);
+  }
 
   const v3Result = v3Call.ok ? v3Call.result : null;
   const turboResult = turboCall.ok ? turboCall.result : null;
@@ -505,7 +577,7 @@ async function dualWhisperTranscribe(
 
   // Handle cases where one or both failed
   if (!v3Text && !turboText) {
-    console.warn(`[DualWhisper] ${segmentKey}: Both models returned empty`);
+    console.error(`[DualWhisper] ${segmentKey}: Both models returned empty`);
     return {
       finalText: '',
       confidence: 'very-low',
@@ -596,13 +668,26 @@ async function dualWhisperTranscribe(
   const agreementScore = calculateAgreement(v3Text, turboText);
   console.log(`[DualWhisper] ${segmentKey}: Agreement score: ${(agreementScore * 100).toFixed(1)}%`);
 
+  // Check completeness offset - detect if one model skipped the beginning
+  const moreComplete = checkCompletenessOffset(v3Text, turboText);
+  if (moreComplete) {
+    issues.push(`${moreComplete} is more complete (other may have skipped beginning)`);
+  }
+
   // Decision logic
   let finalText: string;
   let confidence: 'high' | 'medium' | 'low' | 'very-low';
   let method: DualWhisperResult['method'];
 
+  // If one transcript is clearly more complete, prefer it
+  if (moreComplete && agreementScore < 0.8) {
+    finalText = moreComplete === 'v3' ? v3Text : turboText;
+    method = moreComplete === 'v3' ? 'v3-selected' : 'turbo-selected';
+    confidence = 'medium';
+    console.log(`[DualWhisper] ${segmentKey}: Selected ${moreComplete} as MORE COMPLETE transcript`);
+  }
   // HIGH AGREEMENT (>80%): Use consensus
-  if (agreementScore >= 0.8) {
+  else if (agreementScore >= 0.8) {
     // Texts are very similar - prefer turbo (fewer hallucinations) if lengths are similar
     finalText = turboText.length >= v3Text.length * 0.9 ? turboText : v3Text;
     confidence = 'high';
@@ -747,36 +832,56 @@ serve(async (req) => {
       })
       .eq('id', jobId);
 
-    // Get Groq API key
-    const { data: keyData, error: keyError } = await supabaseService.rpc('checkout_groq_key_for_stt', {
-      p_job_id: String(jobId),
-      p_lock_duration_seconds: 600, // 10 min for dual-model calls
-      p_part_number: 1,
-    });
+    // Get TWO Groq API keys: one for V3, one for Turbo
+    console.log(`[groq-speaking-transcribe] Checking out API keys for V3 and Turbo...`);
+    
+    const [v3KeyResult, turboKeyResult] = await Promise.all([
+      supabaseService.rpc('checkout_groq_key_for_stt', {
+        p_job_id: String(jobId),
+        p_lock_duration_seconds: 600,
+        p_part_number: 1, // V3 key
+      }),
+      supabaseService.rpc('checkout_groq_key_for_stt', {
+        p_job_id: String(jobId),
+        p_lock_duration_seconds: 600,
+        p_part_number: 2, // Turbo key
+      }),
+    ]);
 
-    if (keyError || !keyData || keyData.length === 0) {
-      console.error(`[groq-speaking-transcribe] No Groq keys available:`, keyError);
-      throw new Error('No Groq API keys available for STT');
+    if (v3KeyResult.error || !v3KeyResult.data || v3KeyResult.data.length === 0) {
+      console.error(`[groq-speaking-transcribe] No Groq keys available for V3:`, v3KeyResult.error);
+      throw new Error('No Groq API keys available for V3 STT');
     }
 
-    const groqKey = keyData[0];
-    const groqApiKey = groqKey.out_key_value;
-    const groqKeyId = groqKey.out_key_id;
+    const v3Key = v3KeyResult.data[0];
+    const v3ApiKey = v3Key.out_key_value;
+    const v3KeyId = v3Key.out_key_id;
 
-    console.log(`[groq-speaking-transcribe] Using Groq key ${groqKeyId?.slice(0, 8)}...`);
+    // Turbo key may be same as V3 if only one key available
+    let turboApiKey = v3ApiKey;
+    let turboKeyId = v3KeyId;
+    
+    if (!turboKeyResult.error && turboKeyResult.data && turboKeyResult.data.length > 0) {
+      turboApiKey = turboKeyResult.data[0].out_key_value;
+      turboKeyId = turboKeyResult.data[0].out_key_id;
+    }
+
+    const sameKey = v3KeyId === turboKeyId;
+    console.log(`[groq-speaking-transcribe] Using V3 key ${v3KeyId?.slice(0, 8)}..., Turbo key ${turboKeyId?.slice(0, 8)}... (same=${sameKey})`);
 
     await supabaseService
       .from('speaking_evaluation_jobs')
-      .update({ groq_stt_key_id: groqKeyId })
+      .update({ groq_stt_key_id: v3KeyId })
       .eq('id', jobId);
 
-     // Process segments
+    // Process segments
     const filePaths = job.file_paths as Record<string, string>;
     const segments = Object.entries(filePaths);
     const transcriptions: SegmentTranscription[] = [];
-    let totalAudioSeconds = 0;
+    let totalAudioSecondsV3 = 0;
+    let totalAudioSecondsTurbo = 0;
 
-     let turboFailuresInJob = 0;
+    let turboFailuresInJob = 0;
 
     console.log(`[groq-speaking-transcribe] Processing ${segments.length} segments with Dual-Whisper engine`);
 
@@ -796,7 +901,7 @@ serve(async (req) => {
 
       console.log(`[groq-speaking-transcribe] Processing segment ${i + 1}/${segments.length}: ${segmentKey}`);
 
-       try {
+      try {
         // Parse segment key
         const partMatch = segmentKey.match(/part(\d+)/i) || segmentKey.match(/^(\d+)-/);
         const partNumber = partMatch ? parseInt(partMatch[1]) : 1;
@@ -817,15 +922,19 @@ serve(async (req) => {
           continue;
         }
 
-         // Run Dual-Whisper transcription
-         const disableTurbo = turboFailuresInJob >= TURBO_FAILURE_DISABLE_THRESHOLD;
-         const result = await dualWhisperTranscribe(audioBlob, groqApiKey, segmentKey, { disableTurbo });
+        // Run Dual-Whisper transcription with separate keys
+        const disableTurbo = turboFailuresInJob >= TURBO_FAILURE_DISABLE_THRESHOLD;
+        const result = await dualWhisperTranscribe(audioBlob, v3ApiKey, turboApiKey, segmentKey, { disableTurbo });
 
-         // Track Turbo failures so we can stop calling it within this job.
-         if (!disableTurbo && result.method === 'single-fallback' && (result.issues || []).some(i => i.includes('turbo model failed'))) {
-           turboFailuresInJob++;
-           console.warn(`[groq-speaking-transcribe] Turbo failures in job so far: ${turboFailuresInJob}`);
-         }
+        // Track Turbo failures so we can stop calling it within this job.
+        if (!disableTurbo && result.method === 'single-fallback' && (result.issues || []).some(i => i.includes('turbo model failed'))) {
+          turboFailuresInJob++;
+          console.warn(`[groq-speaking-transcribe] Turbo failures in job so far: ${turboFailuresInJob}`);
+        }
+
+        // Track audio seconds for each model separately
+        if (result.v3Text) totalAudioSecondsV3 += result.duration;
+        if (result.turboText && !disableTurbo) totalAudioSecondsTurbo += result.duration;
 
         transcriptions.push({
           segmentKey,
@@ -845,24 +954,23 @@ serve(async (req) => {
           issues: result.issues,
         });
 
-        totalAudioSeconds += result.duration;
-
         console.log(`[groq-speaking-transcribe] ${segmentKey}: ${result.wordCount} words, ${result.confidence} confidence, method=${result.method}`);
 
-       } catch (segmentError: any) {
+      } catch (segmentError: any) {
         console.error(`[groq-speaking-transcribe] Segment ${segmentKey} error:`, segmentError.message);
 
-         if (segmentError instanceof WhisperHTTPError && segmentError.status === 429) {
-           await supabaseService.rpc('mark_groq_key_rpm_limited', {
-             p_key_id: groqKeyId,
-             p_cooldown_seconds: 60,
-           });
-           throw new Error('RATE_LIMIT: Groq RPM limit hit');
-         }
-
-         if (segmentError.message?.includes('429') || segmentError.message?.includes('rate limit')) {
+        if (segmentError instanceof WhisperHTTPError && segmentError.status === 429) {
+          console.error(`[groq-speaking-transcribe] Rate limit hit on segment ${segmentKey}`);
           await supabaseService.rpc('mark_groq_key_rpm_limited', {
-            p_key_id: groqKeyId,
+            p_key_id: v3KeyId,
+            p_cooldown_seconds: 60,
+          });
+          throw new Error('RATE_LIMIT: Groq RPM limit hit');
+        }
+
+        if (segmentError.message?.includes('429') || segmentError.message?.includes('rate limit')) {
+          await supabaseService.rpc('mark_groq_key_rpm_limited', {
+            p_key_id: v3KeyId,
             p_cooldown_seconds: 60,
           });
           throw new Error('RATE_LIMIT: Groq RPM limit hit');
@@ -870,22 +978,36 @@ serve(async (req) => {
       }
     }
 
-    // Record ASH usage
-    if (totalAudioSeconds > 0) {
-      // Multiply by 2 since we use both models
+    // Record ASH usage separately for each key
+    if (totalAudioSecondsV3 > 0) {
       await supabaseService.rpc('record_groq_ash_usage', {
-        p_key_id: groqKeyId,
-        p_audio_seconds: Math.ceil(totalAudioSeconds * 2),
+        p_key_id: v3KeyId,
+        p_audio_seconds: Math.ceil(totalAudioSecondsV3),
       });
-      console.log(`[groq-speaking-transcribe] Recorded ${Math.ceil(totalAudioSeconds * 2)}s ASH usage (2x for dual-model)`);
+      console.log(`[groq-speaking-transcribe] Recorded ${Math.ceil(totalAudioSecondsV3)}s ASH usage for V3 key`);
+    }
+    
+    if (totalAudioSecondsTurbo > 0 && !sameKey) {
+      await supabaseService.rpc('record_groq_ash_usage', {
+        p_key_id: turboKeyId,
+        p_audio_seconds: Math.ceil(totalAudioSecondsTurbo),
+      });
+      console.log(`[groq-speaking-transcribe] Recorded ${Math.ceil(totalAudioSecondsTurbo)}s ASH usage for Turbo key`);
+    } else if (totalAudioSecondsTurbo > 0 && sameKey) {
+      // Same key - add to total
+      await supabaseService.rpc('record_groq_ash_usage', {
+        p_key_id: v3KeyId,
+        p_audio_seconds: Math.ceil(totalAudioSecondsTurbo),
+      });
+      console.log(`[groq-speaking-transcribe] Recorded additional ${Math.ceil(totalAudioSecondsTurbo)}s ASH usage for Turbo (same key)`);
     }
 
     // Store results
     const transcriptionResult = {
       transcriptions,
-      totalAudioSeconds,
+      totalAudioSeconds: totalAudioSecondsV3 + totalAudioSecondsTurbo,
       segmentCount: transcriptions.length,
-      pipelineVersion: 'dual-whisper-2.0',
+      pipelineVersion: 'dual-whisper-2.1',
       processedAt: new Date().toISOString(),
     };
 
@@ -900,7 +1022,7 @@ serve(async (req) => {
       })
       .eq('id', jobId);
 
-    console.log(`[groq-speaking-transcribe] Transcription complete. ${transcriptions.length} segments, ${totalAudioSeconds.toFixed(1)}s audio`);
+    console.log(`[groq-speaking-transcribe] Transcription complete. ${transcriptions.length} segments, ${(totalAudioSecondsV3 + totalAudioSecondsTurbo).toFixed(1)}s audio`);
 
     // Trigger evaluation
     const evalUrl = `${supabaseUrl}/functions/v1/groq-speaking-evaluate`;
@@ -918,8 +1040,8 @@ serve(async (req) => {
     return new Response(JSON.stringify({
       success: true,
       segmentsTranscribed: transcriptions.length,
-      totalAudioSeconds,
-      pipelineVersion: 'dual-whisper-2.0',
+      totalAudioSeconds: totalAudioSecondsV3 + totalAudioSecondsTurbo,
+      pipelineVersion: 'dual-whisper-2.1',
     }), {
       status: 200,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
