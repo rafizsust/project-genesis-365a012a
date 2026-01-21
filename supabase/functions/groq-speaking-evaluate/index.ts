@@ -668,8 +668,8 @@ function estimatePronunciation(transcriptions: TranscriptionSegment[]): Pronunci
 
   const weightedConfidence = transcriptions.reduce((sum, t) => sum + (t.avgConfidence * t.wordCount), 0) / Math.max(1, totalWords);
   const avgLogprob = transcriptions.reduce((sum, t) => sum + t.avgLogprob, 0) / transcriptions.length;
-  const totalFillerWords = transcriptions.reduce((sum, t) => sum + t.fillerWords.length, 0);
-  const totalLongPauses = transcriptions.reduce((sum, t) => sum + t.longPauses.length, 0);
+  const totalFillerWords = transcriptions.reduce((sum, t) => sum + (t.fillerWords?.length || 0), 0);
+  const totalLongPauses = transcriptions.reduce((sum, t) => sum + (t.longPauses?.length || 0), 0);
   const fillerRatio = totalFillerWords / Math.max(1, totalWords);
 
   const normalizedClarity = Math.max(0, Math.min(1, (avgLogprob + 1)));
