@@ -107,6 +107,12 @@ interface DualWhisperResult {
   duration: number;
   issues: string[];
   wordCount: number;
+  // Metadata used downstream by groq-speaking-evaluate
+  avgLogprob: number;
+  noSpeechProb: number;
+  avgConfidence: number;
+  fillerWords: string[];
+  longPauses: { start: number; end: number; duration: number }[];
 }
 
 interface SegmentTranscription {
@@ -116,10 +122,56 @@ interface SegmentTranscription {
   text: string;
   duration: number;
   wordCount: number;
+  avgConfidence: number;
+  avgLogprob: number;
+  fillerWords: string[];
+  longPauses: { start: number; end: number; duration: number }[];
+  noSpeechProb?: number;
   confidence: string;
   method: string;
   agreementScore: number;
   issues: string[];
+}
+
+function extractFillerWords(text: string): string[] {
+  const fillers = ['um', 'uh', 'er', 'ah', 'like', 'you know', 'i mean'];
+  const lower = text.toLowerCase();
+  const found: string[] = [];
+  for (const f of fillers) {
+    const re = new RegExp(`\\b${f.replace(/\s+/g, '\\s+')}\\b`, 'g');
+    const matches = lower.match(re);
+    if (matches?.length) found.push(...Array(matches.length).fill(f));
+  }
+  return found;
+}
+
+function extractWhisperMeta(result: WhisperResponse | null): {
+  avgLogprob: number;
+  noSpeechProb: number;
+  longPauses: { start: number; end: number; duration: number }[];
+} {
+  const segments = result?.segments ?? [];
+  const logprobs = segments
+    .map(s => (typeof s.avg_logprob === 'number' && Number.isFinite(s.avg_logprob) ? s.avg_logprob : null))
+    .filter((v): v is number => v !== null);
+  const noSpeech = segments
+    .map(s => (typeof s.no_speech_prob === 'number' && Number.isFinite(s.no_speech_prob) ? s.no_speech_prob : null))
+    .filter((v): v is number => v !== null);
+
+  const avgLogprob = logprobs.length ? logprobs.reduce((a, b) => a + b, 0) / logprobs.length : -1;
+  const noSpeechProb = noSpeech.length ? noSpeech.reduce((a, b) => a + b, 0) / noSpeech.length : 0;
+
+  const longPauses: { start: number; end: number; duration: number }[] = [];
+  for (let i = 0; i < segments.length - 1; i++) {
+    const end = segments[i].end;
+    const start = segments[i + 1].start;
+    const gap = start - end;
+    if (Number.isFinite(gap) && gap >= 2) {
+      longPauses.push({ start: end, end: start, duration: gap });
+    }
+  }
+
+  return { avgLogprob, noSpeechProb, longPauses };
 }
 
 // =============================================================================
@@ -405,6 +457,11 @@ async function dualWhisperTranscribe(
       duration,
       issues: ['Both Whisper models failed'],
       wordCount: 0,
+      avgLogprob: -1,
+      noSpeechProb: 0,
+      avgConfidence: 0,
+      fillerWords: [],
+      longPauses: [],
     };
   }
 
@@ -412,6 +469,7 @@ async function dualWhisperTranscribe(
     console.log(`[DualWhisper] ${segmentKey}: v3 failed, using turbo`);
     issues.push('v3 model failed, using turbo only');
     const wordCount = turboText?.split(/\s+/).filter(w => w.length > 0).length || 0;
+    const meta = extractWhisperMeta(turboResult);
     return {
       finalText: turboText || '',
       confidence: 'low',
@@ -422,6 +480,11 @@ async function dualWhisperTranscribe(
       duration,
       issues,
       wordCount,
+      avgLogprob: meta.avgLogprob,
+      noSpeechProb: meta.noSpeechProb,
+      avgConfidence: Math.max(0, Math.min(1, meta.avgLogprob + 1)),
+      fillerWords: extractFillerWords(turboText || ''),
+      longPauses: meta.longPauses,
     };
   }
 
@@ -429,6 +492,7 @@ async function dualWhisperTranscribe(
     console.log(`[DualWhisper] ${segmentKey}: turbo failed, using v3`);
     issues.push('turbo model failed, using v3 only');
     const wordCount = v3Text.split(/\s+/).filter(w => w.length > 0).length;
+    const meta = extractWhisperMeta(v3Result);
     return {
       finalText: v3Text,
       confidence: 'low',
@@ -439,6 +503,11 @@ async function dualWhisperTranscribe(
       duration,
       issues,
       wordCount,
+      avgLogprob: meta.avgLogprob,
+      noSpeechProb: meta.noSpeechProb,
+      avgConfidence: Math.max(0, Math.min(1, meta.avgLogprob + 1)),
+      fillerWords: extractFillerWords(v3Text),
+      longPauses: meta.longPauses,
     };
   }
 
@@ -525,6 +594,9 @@ async function dualWhisperTranscribe(
 
   const wordCount = finalText.split(/\s+/).filter(w => w.length > 0).length;
 
+  // Prefer v3 metadata when available (turbo is currently unstable for some segments)
+  const meta = extractWhisperMeta(v3Result || turboResult);
+
   return {
     finalText,
     confidence,
@@ -535,6 +607,11 @@ async function dualWhisperTranscribe(
     duration,
     issues,
     wordCount,
+    avgLogprob: meta.avgLogprob,
+    noSpeechProb: meta.noSpeechProb,
+    avgConfidence: Math.max(0, Math.min(1, meta.avgLogprob + 1)),
+    fillerWords: extractFillerWords(finalText),
+    longPauses: meta.longPauses,
   };
 }
 
@@ -679,6 +756,11 @@ serve(async (req) => {
           text: result.finalText,
           duration: result.duration,
           wordCount: result.wordCount,
+          avgConfidence: result.avgConfidence,
+          avgLogprob: result.avgLogprob,
+          fillerWords: result.fillerWords,
+          longPauses: result.longPauses,
+          noSpeechProb: result.noSpeechProb,
           confidence: result.confidence,
           method: result.method,
           agreementScore: result.agreementScore,

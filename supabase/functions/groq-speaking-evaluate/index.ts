@@ -650,7 +650,14 @@ function estimatePronunciation(transcriptions: TranscriptionSegment[]): Pronunci
     return { estimatedBand: 2.0, confidence: 'low', evidence: ['No transcription data available - cannot evaluate pronunciation'] };
   }
 
-  const totalWords = transcriptions.reduce((sum, t) => sum + t.wordCount, 0);
+  const safeWordCount = (t: Partial<TranscriptionSegment>) => {
+    const wc = typeof t.wordCount === 'number' && Number.isFinite(t.wordCount)
+      ? t.wordCount
+      : (t.text ? t.text.split(/\s+/).filter(w => w.length > 0).length : 0);
+    return Math.max(0, wc);
+  };
+
+  const totalWords = transcriptions.reduce((sum, t) => sum + safeWordCount(t), 0);
   
   // CRITICAL FIX: If minimal words (<20), pronunciation cannot be properly evaluated
   // Return a low score that's consistent with other criteria scores
@@ -666,10 +673,19 @@ function estimatePronunciation(transcriptions: TranscriptionSegment[]): Pronunci
     };
   }
 
-  const weightedConfidence = transcriptions.reduce((sum, t) => sum + (t.avgConfidence * t.wordCount), 0) / Math.max(1, totalWords);
-  const avgLogprob = transcriptions.reduce((sum, t) => sum + t.avgLogprob, 0) / transcriptions.length;
-  const totalFillerWords = transcriptions.reduce((sum, t) => sum + (t.fillerWords?.length || 0), 0);
-  const totalLongPauses = transcriptions.reduce((sum, t) => sum + (t.longPauses?.length || 0), 0);
+  const weightedConfidenceNumerator = transcriptions.reduce((sum, t) => {
+    const conf = typeof t.avgConfidence === 'number' && Number.isFinite(t.avgConfidence) ? t.avgConfidence : 0;
+    return sum + (conf * safeWordCount(t));
+  }, 0);
+  const weightedConfidence = weightedConfidenceNumerator / Math.max(1, totalWords);
+
+  const logprobs = transcriptions
+    .map(t => (typeof t.avgLogprob === 'number' && Number.isFinite(t.avgLogprob) ? t.avgLogprob : null))
+    .filter((v): v is number => v !== null);
+  const avgLogprob = logprobs.length ? (logprobs.reduce((a, b) => a + b, 0) / logprobs.length) : -1;
+
+  const totalFillerWords = transcriptions.reduce((sum, t) => sum + (t.fillerWords?.length ?? 0), 0);
+  const totalLongPauses = transcriptions.reduce((sum, t) => sum + (t.longPauses?.length ?? 0), 0);
   const fillerRatio = totalFillerWords / Math.max(1, totalWords);
 
   const normalizedClarity = Math.max(0, Math.min(1, (avgLogprob + 1)));
@@ -685,6 +701,14 @@ function estimatePronunciation(transcriptions: TranscriptionSegment[]): Pronunci
     (1 - fluencyPenalty) * 0.20 +
     (1 - pausePenalty) * 0.15
   );
+
+  if (!Number.isFinite(compositeScore)) {
+    return {
+      estimatedBand: 2.0,
+      confidence: 'low',
+      evidence: ['Insufficient transcription metadata (missing confidence/logprob) - cannot evaluate pronunciation reliably'],
+    };
+  }
 
   const rawBand = compositeScore * 6 + 3;
   // No artificial cap - calibration happens post-LLM based on other criteria
@@ -768,13 +792,17 @@ function buildEvaluationPrompt(
   // Build COMPACT transcript section with explicit duration metadata for fluency interpretation
   const transcriptSection = transcriptions.map(t => {
     const questionText = getQuestionTextFromPayload(testPayload, t.partNumber, t.questionNumber, t.segmentKey);
-    const pauseCount = t.longPauses.length;
-    const wpm = t.duration > 0 ? Math.round((t.wordCount / t.duration) * 60) : 0;
+    const pauseCount = t.longPauses?.length ?? 0;
+    const safeDuration = (typeof t.duration === 'number' && Number.isFinite(t.duration) && t.duration > 0) ? t.duration : 0;
+    const safeWords = (typeof t.wordCount === 'number' && Number.isFinite(t.wordCount))
+      ? t.wordCount
+      : (t.text ? t.text.split(/\s+/).filter(w => w.length > 0).length : 0);
+    const wpm = safeDuration > 0 ? Math.round((safeWords / safeDuration) * 60) : 0;
     // Compact format with WPM for pacing analysis
-    return `[Part: ${t.partNumber}][Duration: ${t.duration.toFixed(0)}s] ${t.segmentKey}
+    return `[Part: ${t.partNumber}][Duration: ${safeDuration.toFixed(0)}s] ${t.segmentKey}
 Q: "${questionText || 'N/A'}"
 T: "${t.text}"
-Stats: ${t.wordCount}w | ${wpm}wpm | ${pauseCount} pauses`;
+ Stats: ${safeWords}w | ${wpm}wpm | ${pauseCount} pauses`;
   }).join('\n\n');
 
   const totalQuestions = transcriptions.length;
