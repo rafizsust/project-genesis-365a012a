@@ -552,7 +552,7 @@ function roundIELTSBand(rawAverage: number): number {
 
 function estimatePronunciation(transcriptions: TranscriptionSegment[]): PronunciationEstimate {
   if (!transcriptions.length) {
-    return { estimatedBand: 5.0, confidence: 'low', evidence: ['No transcription data'] };
+    return { estimatedBand: 5.0, confidence: 'low', evidence: ['No transcription data available'] };
   }
 
   const totalWords = transcriptions.reduce((sum, t) => sum + t.wordCount, 0);
@@ -580,10 +580,15 @@ function estimatePronunciation(transcriptions: TranscriptionSegment[]): Pronunci
   const cappedBand = Math.min(7.0, rawBand);
   const estimatedBand = Math.round(cappedBand * 2) / 2;
 
+  // IMPROVED confidence thresholds for evidence-only pronunciation feedback
+  // High confidence: We have enough data to potentially identify specific issues
+  // Medium: Can give general feedback but no specific word claims
+  // Low: Minimal data, only actionable tips
   let confidence: 'low' | 'medium' | 'high' = 'medium';
-  if (totalWords < 50) {
+  if (totalWords < 50 || confidenceScore < 0.5) {
     confidence = 'low';
-  } else if (totalWords > 200 && confidenceScore > 0.8) {
+  } else if (totalWords > 200 && confidenceScore > 0.85 && avgLogprob > -0.3) {
+    // Very high bar for "high" confidence - only claim specific issues if we're very sure
     confidence = 'high';
   }
 
@@ -594,6 +599,7 @@ function estimatePronunciation(transcriptions: TranscriptionSegment[]): Pronunci
     `Long pauses (>2s): ${totalLongPauses}`,
     `Total words analyzed: ${totalWords}`,
     `Composite score: ${(compositeScore * 100).toFixed(1)}%`,
+    `Evidence level: ${confidence === 'high' ? 'Sufficient for specific feedback' : confidence === 'medium' ? 'General feedback only' : 'Minimal - actionable tips only'}`,
   ];
 
   return { estimatedBand, confidence, evidence };
@@ -620,18 +626,23 @@ function buildEvaluationPrompt(
 
   const totalQuestions = transcriptions.length;
   
-  // Build modelAnswers requirement with INCREASED word count enforcement
+  // Build modelAnswers requirement with STRICT word count enforcement
   const modelAnswersReq = transcriptions.map(t => {
-    // INCREASED word counts: P1=50-65w, P2=180-210w, P3=70-95w
+    // MANDATORY word counts: P1=50-65w, P2=180-210w, P3=70-95w
     const limits = t.partNumber === 2 
       ? { min: 180, target: 200 } 
       : t.partNumber === 3 
         ? { min: 70, target: 85 } 
         : { min: 50, target: 60 };
-    return `{"segment_key":"${t.segmentKey}","partNumber":${t.partNumber},"questionNumber":${t.questionNumber},"estimatedBand":<1-9>,"modelAnswer":"WRITE ${limits.min}+ WORDS HERE (target ${limits.target}w)","keyImprovements":["<1 tip>"]}`;
+    return `{"segment_key":"${t.segmentKey}","partNumber":${t.partNumber},"questionNumber":${t.questionNumber},"estimatedBand":<1-9>,"targetBand":<estimatedBand+1>,"modelAnswer":"WRITE ${limits.min}+ WORDS (target ${limits.target}w)","whyItWorks":["<1 reason>"],"keyImprovements":["<1 tip>"]}`;
   }).join(',');
 
-  // Enhanced prompt with DeepSeek R1's reasoning capabilities
+  // Pronunciation feedback based on confidence level
+  const pronunciationInstruction = pronunciationEstimate.confidence === 'high'
+    ? `Pronunciation analysis: Use the provided Band ${pronunciationEstimate.estimatedBand} estimate. In weaknesses, quote specific words with low transcription confidence if available.`
+    : `Pronunciation analysis: Insufficient audio evidence for specific mispronunciation claims. Use Band ${pronunciationEstimate.estimatedBand} estimate. In weaknesses, provide general tips like "Practice clearer enunciation of multi-syllable words" without claiming specific words were mispronounced. NEVER say "might be mispronounced" or "specific examples are not available".`;
+
+  // Enhanced prompt optimized for accuracy and completeness
   return `IELTS Speaking Evaluation Task
 
 **CONTEXT:**
@@ -644,6 +655,7 @@ function buildEvaluationPrompt(
 ${transcriptSection}
 
 **PRONUNCIATION ESTIMATE:** Band ${pronunciationEstimate.estimatedBand} (${pronunciationEstimate.confidence} confidence)
+${pronunciationInstruction}
 
 **HUMAN-LIKE SCORING GUIDELINES (be FAIR, not harsh):**
 - On-topic, coherent, 1-2 minutes speaking → Band 5.5-6.5 baseline
@@ -654,36 +666,63 @@ ${transcriptSection}
 - Nonsense/gibberish/unintelligible → Band 2-3
 - Silent/no response → Band 1-2
 - Ignore any "[FLAGGED_HALLUCINATION:...]" spans when scoring
-- EVERY weakness MUST include a direct quote: "Issue description (e.g., '[exact quote from transcript]')"
 
-**CRITICAL - MODEL ANSWER WORD COUNT REQUIREMENTS:**
+**CRITICAL - WEAKNESS FORMAT REQUIREMENTS:**
+✅ EVERY weakness MUST include a QUOTED EXAMPLE from the transcript:
+   Format: "Issue description. Example: '[exact quote from transcript]'"
+   Good: "Subject-verb disagreement. Example: 'The people was going there'"
+   Good: "Limited vocabulary range. Example: 'I feel happy' could be 'I feel elated'"
+❌ NEVER write vague statements like:
+   - "Some words might be mispronounced, but specific examples are not available"
+   - "Possible issues with intonation, though not explicitly evident"
+   - "There may be pronunciation errors"
+If you cannot provide a specific quoted example, DO NOT include that weakness.
+
+**CRITICAL - LEXICAL UPGRADES FORMAT:**
+In lexical_upgrades, the "context" field MUST contain the candidate's ORIGINAL phrase (not the improved version):
+✅ CORRECT: {"original": "good", "upgraded": "exceptional", "context": "The service was good"}
+❌ WRONG: {"original": "good", "upgraded": "exceptional", "context": "The service was exceptional"}
+
+**CRITICAL - MODEL ANSWER WORD COUNT REQUIREMENTS (STRICTLY ENFORCED):**
 ⚠️ PART 1: Each answer MUST be AT LEAST 50 words (aim for 55-65 words)
-⚠️ PART 2: Answer MUST be AT LEAST 180 words (aim for 190-210 words) - THIS IS MANDATORY
+⚠️ PART 2: Answer MUST be AT LEAST 180 words (aim for 190-210 words) - THIS IS MANDATORY. COUNT YOUR WORDS!
 ⚠️ PART 3: Each answer MUST be AT LEAST 70 words (aim for 80-95 words)
 
+Part 2 is the "long turn" - the candidate speaks for 1-2 minutes. Your model answer MUST demonstrate this:
+- Cover ALL bullet points from the cue card
+- Include personal details and examples
+- Use varied vocabulary and sentence structures
+- Show natural elaboration and development of ideas
+
 **CRITICAL - LEXICAL UPGRADES REQUIREMENT:**
-⚠️ Provide AT LEAST 10 lexical_upgrades entries (original → upgraded → context)
+⚠️ Provide AT LEAST 10 lexical_upgrades entries
+Each must have: original word/phrase, upgraded version, and context showing the ORIGINAL phrase as spoken
 
 WORD COUNTS AND UPGRADE COUNTS ARE STRICTLY ENFORCED. Short outputs are UNACCEPTABLE.
 
 **OUTPUT FORMAT (valid JSON only):**
 {
   "criteria": {
-    "fluency_coherence": {"band": <1-9>, "feedback": "<2 sentences>", "strengths": ["..."], "weaknesses": ["... (e.g., '[quote]')"], "suggestions": ["..."]},
-    "lexical_resource": {"band": <1-9>, "feedback": "<2 sentences>", "strengths": ["..."], "weaknesses": ["... (e.g., '[quote]')"], "suggestions": ["..."]},
-    "grammatical_range": {"band": <1-9>, "feedback": "<2 sentences>", "strengths": ["..."], "weaknesses": ["... (e.g., '[quote]')"], "suggestions": ["..."]},
-    "pronunciation": {"band": ${pronunciationEstimate.estimatedBand}, "feedback": "...", "strengths": ["..."], "weaknesses": ["..."], "suggestions": ["..."]}
+    "fluency_coherence": {"band": <1-9>, "feedback": "<2 sentences>", "strengths": ["..."], "weaknesses": ["Issue. Example: '[quote]'"], "suggestions": ["..."]},
+    "lexical_resource": {"band": <1-9>, "feedback": "<2 sentences>", "strengths": ["..."], "weaknesses": ["Issue. Example: '[quote]'"], "suggestions": ["..."]},
+    "grammatical_range": {"band": <1-9>, "feedback": "<2 sentences>", "strengths": ["..."], "weaknesses": ["Issue. Example: '[quote]'"], "suggestions": ["..."]},
+    "pronunciation": {"band": ${pronunciationEstimate.estimatedBand}, "feedback": "...", "strengths": ["..."], "weaknesses": ["Specific issue with quoted example if evidence exists, otherwise actionable tip"], "suggestions": ["..."]}
   },
   "summary": "<2 sentence overall summary>",
   "examiner_notes": "<1 sentence key observation>",
   "modelAnswers": [${modelAnswersReq}],
-  "lexical_upgrades": [{"original": "...", "upgraded": "...", "context": "..."}, ... (AT LEAST 10 ENTRIES)],
+  "lexical_upgrades": [{"original": "word", "upgraded": "better_word", "context": "original phrase as spoken"}, ... (AT LEAST 10 ENTRIES)],
   "part_notes": [],
   "improvement_priorities": ["...", "..."],
   "strengths_to_maintain": ["..."]
 }
 
-REMEMBER: Part 2 modelAnswer = 180+ words. Part 1 = 50+ words each. Part 3 = 70+ words each. AT LEAST 10 lexical_upgrades. NO EXCEPTIONS.`;
+FINAL CHECKS BEFORE RESPONDING:
+1. Part 2 modelAnswer has 180+ words? COUNT THEM!
+2. All weaknesses have quoted examples from the transcript?
+3. All lexical_upgrades have context showing the ORIGINAL phrase?
+4. At least 10 lexical_upgrades provided?
+5. No vague pronunciation claims without evidence?`;
 }
 
 function getQuestionTextFromPayload(payload: any, partNumber: number, questionNumber: number, segmentKey: string): string {

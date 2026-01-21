@@ -191,6 +191,83 @@ export default function AIPracticeSpeakingTest() {
   const TEST_MAX_DURATION_MS = 45 * 60 * 1000;
   const testStartTimeRef = useRef<number | null>(null);
 
+  // =====================================================================
+  // BACKGROUND AUDIO PROCESSING - Immediate per-question upload
+  // =====================================================================
+  // Track which segments have been uploaded to R2 (key -> r2Path)
+  const uploadedR2PathsRef = useRef<Record<string, string>>({});
+  // Track which segments are currently being processed
+  const processingSegmentsRef = useRef<Set<string>>(new Set());
+  // Queue of segments awaiting processing
+  const pendingProcessQueueRef = useRef<Array<{ key: string; blob: Blob; duration: number }>>([]);
+  // Flag to indicate if processor is running
+  const isProcessorRunningRef = useRef(false);
+
+  // Background processor - runs as soon as segments are queued
+  const processBackgroundQueue = async () => {
+    if (isProcessorRunningRef.current) return;
+    isProcessorRunningRef.current = true;
+
+    while (pendingProcessQueueRef.current.length > 0) {
+      const item = pendingProcessQueueRef.current.shift();
+      if (!item) continue;
+
+      const { key, blob, duration } = item;
+      if (processingSegmentsRef.current.has(key)) continue;
+      if (uploadedR2PathsRef.current[key]) continue; // Already uploaded
+
+      processingSegmentsRef.current.add(key);
+      console.log(`[BackgroundUpload] Processing ${key} (${(blob.size / 1024).toFixed(1)}KB, ${duration.toFixed(1)}s)`);
+
+      try {
+        // Step 1: Trim silence + compress to MP3
+        const mp3DataUrl = await toMp3DataUrl(blob, key);
+
+        // Step 2: Upload to R2
+        const { data: uploadResult, error: uploadError } = await supabase.functions.invoke('upload-speaking-audio', {
+          body: {
+            testId,
+            partNumber: parseInt(key.match(/^part(\d)/)?.[1] || '1'),
+            audioData: { [key]: mp3DataUrl },
+          },
+        });
+
+        if (uploadError) {
+          console.error(`[BackgroundUpload] Upload error for ${key}:`, uploadError);
+        } else if (uploadResult?.uploadedUrls?.[key]) {
+          const uploadedUrl = uploadResult.uploadedUrls[key];
+          const urlParts = uploadedUrl.split('/');
+          const r2Key = urlParts.slice(3).join('/');
+          uploadedR2PathsRef.current[key] = r2Key;
+          console.log(`[BackgroundUpload] ✓ Uploaded ${key} -> ${r2Key}`);
+        }
+      } catch (err) {
+        console.error(`[BackgroundUpload] Error processing ${key}:`, err);
+      } finally {
+        processingSegmentsRef.current.delete(key);
+      }
+    }
+
+    isProcessorRunningRef.current = false;
+  };
+
+  // Queue a segment for background processing (called after recording stops)
+  const queueBackgroundUpload = useCallback((key: string, chunks: Blob[], duration: number) => {
+    if (!testId) return;
+    if (uploadedR2PathsRef.current[key]) return; // Already uploaded
+    if (chunks.length === 0) return;
+
+    const inferredType = chunks[0]?.type || 'audio/webm';
+    const blob = new Blob(chunks, { type: inferredType });
+    if (blob.size === 0) return;
+
+    console.log(`[BackgroundUpload] Queuing ${key} for processing (${(blob.size / 1024).toFixed(1)}KB)`);
+    pendingProcessQueueRef.current.push({ key, blob, duration });
+
+    // Start processor (non-blocking)
+    processBackgroundQueue();
+  }, [testId]);
+  // =====================================================================
   
   // Submission error state (for resubmit capability)
   const [submissionError, setSubmissionError] = useState<ApiErrorDescriptor | null>(null);
@@ -619,15 +696,20 @@ export default function AIPracticeSpeakingTest() {
         if (!pending) return;
 
         const duration = Math.max(0, (Date.now() - pending.startMs) / 1000);
+        const chunks = [...audioChunksRef.current];
 
         setAudioSegments((prev) => ({
           ...prev,
           [pending.key]: {
             ...pending.meta,
-            chunks: [...audioChunksRef.current],
+            chunks,
             duration,
           },
         }));
+
+        // IMMEDIATE BACKGROUND UPLOAD: Queue this segment for processing
+        // This happens as soon as the user stops recording, not at the end of the test
+        queueBackgroundUpload(pending.key, chunks, duration);
       } finally {
         pendingStopMetaRef.current = null;
       }
@@ -1300,12 +1382,29 @@ export default function AIPracticeSpeakingTest() {
         });
       }
 
-      // STEP 1: Upload all audio files to R2
+      // STEP 1: Use pre-uploaded files from background queue, upload remaining ones
       const filePaths: Record<string, string> = {};
       const uploadErrors: Array<{ key: string; error: string }> = [];
+      
+      // First, copy any already-uploaded paths from background queue + their durations
+      for (const [key, r2Path] of Object.entries(uploadedR2PathsRef.current)) {
+        if (keys.includes(key)) {
+          filePaths[key] = r2Path;
+          // Get duration from segments state
+          const seg = segments[key];
+          if (seg?.duration) {
+            durations[key] = seg.duration;
+          }
+          console.log(`[AIPracticeSpeakingTest] Using pre-uploaded: ${key} -> ${r2Path}`);
+        }
+      }
+      
+      const remainingKeys = keys.filter(k => !filePaths[k]);
+      const preUploadedCount = Object.keys(filePaths).length;
+      console.log(`[AIPracticeSpeakingTest] Pre-uploaded: ${preUploadedCount}, remaining: ${remainingKeys.length}`);
 
-      for (let i = 0; i < keys.length; i++) {
-        const key = keys[i];
+      for (let i = 0; i < remainingKeys.length; i++) {
+        const key = remainingKeys[i];
         // Only abort for explicit exit request - accuracy mode submissions continue after unmount
         if (exitRequestedRef.current) return;
         if (!backgroundSubmissionActiveRef.current && !isMountedRef.current) return;
@@ -1317,11 +1416,12 @@ export default function AIPracticeSpeakingTest() {
 
         if (blob.size === 0) continue;
 
-        // Update progress: Converting audio
+        // Update progress: Converting audio (only for remaining files)
+        const completedCount = Object.keys(filePaths).length + i + 1;
         setSubmissionProgress({ 
           step: 'Converting Audio', 
-          detail: `Converting recording ${i + 1} of ${totalAudioFiles} to MP3...`, 
-          currentItem: i + 1, 
+          detail: `Converting recording ${completedCount} of ${totalAudioFiles} to MP3...`, 
+          currentItem: completedCount, 
           totalItems: totalAudioFiles 
         });
 
@@ -1338,11 +1438,12 @@ export default function AIPracticeSpeakingTest() {
           continue;
         }
 
-        // Update progress: Uploading audio
+        // Update progress: Uploading audio (only for remaining files)
+        const uploadCompletedCount = Object.keys(filePaths).length + i + 1;
         setSubmissionProgress({ 
           step: 'Uploading Audio', 
-          detail: `Uploading recording ${i + 1} of ${totalAudioFiles}...`, 
-          currentItem: i + 1, 
+          detail: `Uploading recording ${uploadCompletedCount} of ${totalAudioFiles}...`, 
+          currentItem: uploadCompletedCount, 
           totalItems: totalAudioFiles 
         });
         
@@ -1350,7 +1451,7 @@ export default function AIPracticeSpeakingTest() {
         if (testId) {
           patchSpeakingSubmissionTracker(testId, {
             stage: 'uploading' as SpeakingSubmissionStage,
-            detail: `Uploading ${i + 1} of ${totalAudioFiles}...`,
+            detail: `Uploading ${uploadCompletedCount} of ${totalAudioFiles}...`,
           });
         }
 
