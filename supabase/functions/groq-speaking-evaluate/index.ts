@@ -47,34 +47,58 @@ async function callGroqLLMWithModelFallback(opts: {
   prompt: string;
   maxTokensCandidates: number[];
 }) {
-  // System prompt: human-like IELTS examiner (calibrated scoring, generous model answers)
-  const system = `You are a CERTIFIED IELTS Speaking Examiner scoring like a real human examiner would.
+  // System prompt: Senior IELTS Examiner with strict but fair marking (Reasoning-First approach)
+  const system = `You are a SENIOR IELTS Speaking Examiner (strict but fair).
 
-## SCORING PHILOSOPHY (Human-Like, Not AI-Harsh)
-- IELTS examiners are trained to be FAIR and ENCOURAGING, not punitive.
-- A candidate who speaks coherently on topic for 1-2 minutes in Part 2 typically scores Band 5.5-6.5, even with some errors.
-- Only give Band 4 or below for SEVERE issues: unintelligible speech, extreme brevity (<20 words Part 2), complete off-topic.
-- Fillers (um, uh, like) are NORMAL in natural speech and should NOT heavily penalize fluency.
-- Minor grammatical errors are expected up to Band 7; focus on communication effectiveness.
+## ROLE IDENTITY
+You are a certified examiner with 10+ years experience. You score accurately based on evidence, not assumptions.
+
+## BAND SCORE ANCHOR DEFINITIONS (Condensed Official Descriptors)
+┌─────┬────────────────────────────────────────────────────────────────────────────┐
+│ 5   │ Limited fluency with noticeable hesitations; basic vocabulary adequate    │
+│     │ for familiar topics; frequent grammatical errors; pronunciation generally │
+│     │ understood despite L1 influence                                           │
+├─────┼────────────────────────────────────────────────────────────────────────────┤
+│ 6   │ Speaks at length but with hesitations; uses some complex structures with  │
+│     │ errors; adequate vocabulary with some circumlocution; pronunciation       │
+│     │ generally clear with occasional mispronunciations                         │
+├─────┼────────────────────────────────────────────────────────────────────────────┤
+│ 7   │ Speaks at length WITHOUT NOTICEABLE EFFORT; uses IDIOMATIC language       │
+│     │ naturally; produces error-free sentences frequently; wide range of        │
+│     │ pronunciation features with only occasional lapses                        │
+├─────┼────────────────────────────────────────────────────────────────────────────┤
+│ 8   │ Speaks fluently with only rare repetition; uses wide vocabulary including │
+│     │ uncommon/idiomatic items; wide range of structures flexibly; sustains     │
+│     │ appropriate intonation throughout                                         │
+└─────┴────────────────────────────────────────────────────────────────────────────┘
+
+## CRITICAL: DURATION vs WORD COUNT INTERPRETATION
+- You CANNOT hear audio pace. You only see transcripts with duration metadata.
+- If Duration > 90s for Part 2 but word count is low (e.g., 130 words in 120s):
+  → Interpret as SLOW PACING/HESITATION (Fluency penalty) NOT "Short/Underdeveloped" (Content penalty)
+  → The answer IS fully developed if they spoke for 90+ seconds
+- Low word count + high duration = hesitation/pauses = Fluency issue
+- Low word count + low duration = genuinely short answer = Content issue
+
+## AVOID THE "5.5 SAFETY BIAS TRAP"
+- AI models often default to 5.5-6.0 to avoid being "wrong" - DO NOT do this
+- If candidate uses technical collocations correctly (e.g., "artificial intelligence", "sustainable development"), they MUST score at least 6.5 in Lexical Resource
+- If candidate produces complex sentence starters correctly (e.g., "What I find particularly interesting is..."), they deserve appropriate credit
+- Score based on EVIDENCE, not fear of being wrong
 
 ## HALLUCINATION HANDLING
 - If transcript contains "[FLAGGED_HALLUCINATION:...]", IGNORE that text entirely when scoring.
-- Do NOT penalize candidate for AI-generated artifacts in their transcript.
 
-## OUTPUT REQUIREMENTS
+## OUTPUT REQUIREMENTS: REASONING-FIRST
 1. Valid JSON matching exact schema
-2. EVERY segment_key gets ONE unique modelAnswer (no skips, no duplicates)
-3. EVERY weakness MUST include a quoted example from transcript
+2. EVERY criterion MUST have "justification" field (max 30 words) with specific evidence BEFORE the band score
+3. EVERY segment_key gets ONE unique modelAnswer
+4. Weaknesses MUST quote transcript examples
 
-## MANDATORY MODEL ANSWER WORD COUNTS (COUNT CAREFULLY!)
-- Part 1: MINIMUM 50 words, aim for 55-65 words
-- Part 2: MINIMUM 180 words, aim for 190-210 words (THIS IS CRITICAL)
-- Part 3: MINIMUM 70 words, aim for 80-95 words
-
-## MANDATORY LEXICAL UPGRADES
-- Provide AT LEAST 10 vocabulary upgrades (original → upgraded with context)
-
-FAILURE TO MEET WORD COUNTS OR UPGRADE COUNTS IS UNACCEPTABLE.`;
+## FEEDBACK EFFICIENCY (Token-Optimized)
+- Do NOT rewrite entire candidate responses
+- Provide only: "3 Key Vocabulary Upgrades" and "1 Grammatical Fix" per question
+- Keep justifications under 30 words each`;
 
   // Try each model in the fallback chain
   for (const model of GROQ_LLM_MODELS) {
@@ -355,15 +379,21 @@ serve(async (req) => {
       });
     }
 
-    // Extract criteria with full Gemini-compatible structure
+    // Extract criteria with full Gemini-compatible structure (now includes justification for debugging)
     const extractCriterion = (key: string, camelKey: string) => {
       const c = evaluation?.criteria?.[key] || evaluation?.criteria?.[camelKey] || {};
+      // Log justification for debugging reasoning-first approach
+      if (c.justification) {
+        console.log(`[groq-speaking-evaluate] ${key} justification: ${c.justification}`);
+      }
       return {
         band: typeof c.band === 'number' ? c.band : (typeof c.score === 'number' ? c.score : 5.0),
         feedback: c.feedback || '',
         strengths: Array.isArray(c.strengths) ? c.strengths : [],
         weaknesses: Array.isArray(c.weaknesses) ? c.weaknesses : [],
         suggestions: Array.isArray(c.suggestions) ? c.suggestions : [],
+        // Include justification in output for transparency (UI can display this)
+        justification: c.justification || '',
       };
     };
 
@@ -412,18 +442,35 @@ serve(async (req) => {
       const questionText = getQuestionTextFromPayload(testPayload, t.partNumber, t.questionNumber, t.segmentKey);
       
       if (match) {
+        // Handle both new token-efficient format (keyVocabUpgrades, oneGrammarFix) 
+        // and legacy format (whyItWorks, keyImprovements)
+        const keyVocabUpgrades = Array.isArray(match.keyVocabUpgrades) ? match.keyVocabUpgrades : [];
+        const oneGrammarFix = match.oneGrammarFix || '';
+        
+        // Build keyImprovements from new format if legacy not provided
+        let keyImprovements = Array.isArray(match.keyImprovements) 
+          ? match.keyImprovements 
+          : (Array.isArray(match.key_improvements) ? match.key_improvements : []);
+        
+        // If new format provided, build keyImprovements from it
+        if (keyVocabUpgrades.length > 0 || oneGrammarFix) {
+          keyImprovements = [
+            ...keyVocabUpgrades.map((v: string) => `Vocabulary: ${v}`),
+            ...(oneGrammarFix ? [`Grammar: ${oneGrammarFix}`] : []),
+          ];
+        }
+        
         return {
           segment_key: t.segmentKey,
           partNumber: t.partNumber,
           questionNumber: t.questionNumber,
-          // Always populate from our own source-of-truth to avoid duplicated/missing question text.
           question: questionText || `Part ${t.partNumber} Question ${t.questionNumber}`,
           candidateResponse: t.text || '',
           estimatedBand: typeof match.estimatedBand === 'number' ? match.estimatedBand : undefined,
           targetBand: typeof match.targetBand === 'number' ? match.targetBand : undefined,
           modelAnswer: match.modelAnswer || match.model_answer || '',
           whyItWorks: Array.isArray(match.whyItWorks) ? match.whyItWorks : (Array.isArray(match.why_it_works) ? match.why_it_works : []),
-          keyImprovements: Array.isArray(match.keyImprovements) ? match.keyImprovements : (Array.isArray(match.key_improvements) ? match.key_improvements : []),
+          keyImprovements,
         };
       }
       
@@ -718,129 +765,130 @@ function buildEvaluationPrompt(
   job: any,
   partNumbers: number[]
 ): string {
-  // Build COMPACT transcript section - removed redundant metadata to save ~1000 tokens
+  // Build COMPACT transcript section with explicit duration metadata for fluency interpretation
   const transcriptSection = transcriptions.map(t => {
     const questionText = getQuestionTextFromPayload(testPayload, t.partNumber, t.questionNumber, t.segmentKey);
     const pauseCount = t.longPauses.length;
-    // Compact format: only essential info
-    return `[P${t.partNumber}Q${t.questionNumber}|${t.segmentKey}] Q:"${questionText || 'N/A'}" T:"${t.text}" (${t.wordCount}w/${t.duration.toFixed(0)}s${pauseCount > 0 ? `/${pauseCount}pauses` : ''})`;
-  }).join('\n');
+    const wpm = t.duration > 0 ? Math.round((t.wordCount / t.duration) * 60) : 0;
+    // Compact format with WPM for pacing analysis
+    return `[Part: ${t.partNumber}][Duration: ${t.duration.toFixed(0)}s] ${t.segmentKey}
+Q: "${questionText || 'N/A'}"
+T: "${t.text}"
+Stats: ${t.wordCount}w | ${wpm}wpm | ${pauseCount} pauses`;
+  }).join('\n\n');
 
   const totalQuestions = transcriptions.length;
   
+  // Calculate overall speaking metrics for fluency context
+  const part2Transcripts = transcriptions.filter(t => t.partNumber === 2);
+  const part2Duration = part2Transcripts.reduce((sum, t) => sum + t.duration, 0);
+  const part2Words = part2Transcripts.reduce((sum, t) => sum + t.wordCount, 0);
+  
   // Build modelAnswers requirement with STRICT word count enforcement
   const modelAnswersReq = transcriptions.map(t => {
-    // MANDATORY word counts: P1=50-65w, P2=180-210w, P3=70-95w
     const limits = t.partNumber === 2 
       ? { min: 180, target: 200 } 
       : t.partNumber === 3 
         ? { min: 70, target: 85 } 
         : { min: 50, target: 60 };
-    return `{"segment_key":"${t.segmentKey}","partNumber":${t.partNumber},"questionNumber":${t.questionNumber},"estimatedBand":<1-9>,"targetBand":<estimatedBand+1>,"modelAnswer":"WRITE ${limits.min}+ WORDS (target ${limits.target}w)","whyItWorks":["<1 reason>"],"keyImprovements":["<1 tip>"]}`;
+    return `{"segment_key":"${t.segmentKey}","partNumber":${t.partNumber},"questionNumber":${t.questionNumber},"estimatedBand":<1-9>,"targetBand":<+1band>,"modelAnswer":"${limits.min}+words","keyVocabUpgrades":["<3 items>"],"oneGrammarFix":"<1 item>"}`;
   }).join(',');
 
   // Pronunciation feedback based on confidence level
   const pronunciationInstruction = pronunciationEstimate.confidence === 'high'
-    ? `Pronunciation analysis: Use the provided Band ${pronunciationEstimate.estimatedBand} estimate. In weaknesses, quote specific words with low transcription confidence if available.`
-    : `Pronunciation analysis: Insufficient audio evidence for specific mispronunciation claims. Use Band ${pronunciationEstimate.estimatedBand} estimate. In weaknesses, provide general tips like "Practice clearer enunciation of multi-syllable words" without claiming specific words were mispronounced. NEVER say "might be mispronounced" or "specific examples are not available".`;
+    ? `Use Band ${pronunciationEstimate.estimatedBand}. Quote specific low-confidence words if available.`
+    : `Use Band ${pronunciationEstimate.estimatedBand}. Provide actionable tips only, NO vague claims.`;
 
-  // Enhanced prompt optimized for accuracy and completeness
-  return `IELTS Speaking Evaluation Task
+  // Enhanced prompt with all 6 improvements
+  return `# IELTS Speaking Evaluation Task
 
-**CONTEXT:**
-- Topic: ${job.topic || 'General'}
-- Difficulty: ${job.difficulty || 'Standard'}
-- Parts covered: ${partNumbers.join(', ')}
-- Total questions: ${totalQuestions}
+## 1. INPUT CONTEXT
+Topic: ${job.topic || 'General'} | Difficulty: ${job.difficulty || 'Standard'}
+Parts: ${partNumbers.join(', ')} | Questions: ${totalQuestions}
+${part2Duration > 0 ? `Part 2 Speaking Time: ${part2Duration.toFixed(0)}s (${part2Words} words)` : ''}
 
-**CANDIDATE TRANSCRIPTS:**
+## 2. CANDIDATE TRANSCRIPTS (with duration metadata)
 ${transcriptSection}
 
-**PRONUNCIATION ESTIMATE:** Band ${pronunciationEstimate.estimatedBand} (${pronunciationEstimate.confidence} confidence)
+## 3. PRONUNCIATION ESTIMATE
+Band ${pronunciationEstimate.estimatedBand} (${pronunciationEstimate.confidence} confidence)
 ${pronunciationInstruction}
 
-**HUMAN-LIKE SCORING GUIDELINES (be FAIR, not harsh):**
-- On-topic, coherent, 1-2 minutes speaking → Band 5.5-6.5 baseline
-- Minor vocabulary/grammar slips → still Band 5-6 if communication is clear
-- Some hesitation/fillers are NORMAL → don't over-penalize fluency
-- Off-topic/irrelevant → Band 3.5-4.5
+## 4. SCORING RULES (Apply in Order)
+
+### 4A. DURATION INTERPRETATION (CRITICAL)
+You CANNOT hear the candidate's pace. Use duration metadata to interpret fluency:
+- If Part 2 Duration > 90s: Answer IS fully developed regardless of word count
+- Low words + High duration (e.g., 130w in 120s) → FLUENCY PENALTY (hesitation/pauses)
+- Low words + Low duration (e.g., 50w in 30s) → CONTENT PENALTY (genuinely short)
+- Example: 100 words in 120 seconds = 50 WPM = significant hesitation = Band 5 Fluency
+
+### 4B. BAND ANCHORS (Use These Exact Definitions)
+| Band | Fluency & Coherence | Lexical Resource | Grammar |
+|------|---------------------|------------------|---------|
+| 5 | Noticeable hesitations; basic linkers | Basic vocabulary; circumlocution | Frequent errors; limited structures |
+| 6 | Speaks at length WITH hesitations | Some complex vocab; occasional errors | Some complex structures with errors |
+| 7 | Speaks at length WITHOUT effort; idiomatic | Wide range; flexible word use | Error-free sentences frequently |
+| 8 | Fluent with rare repetition only | Uncommon/idiomatic items naturally | Wide range of structures flexibly |
+
+### 4C. AVOID SAFETY BIAS (THE 5.5 TRAP)
+- If candidate uses technical collocations correctly (e.g., "climate change mitigation", "software engineering") → Lexical ≥ 6.5
+- If candidate uses complex sentence starters (e.g., "What strikes me about...", "Considering that...") → Grammar ≥ 6.5
+- Score based on EVIDENCE. Do not default to 5.5-6.0 to "play it safe"
+
+### 4D. SCORING BASELINES
+- On-topic, coherent, 90s+ speaking → Band 5.5-6.5 baseline
+- Minor slips with clear communication → Band 5-6
+- Fillers (um, uh) are NORMAL → minimal fluency penalty
+- Off-topic → Band 3.5-4.5
 - Very short (<20 words Part 2) → Band 3-4
-- Nonsense/gibberish/unintelligible → Band 2-3
-- Silent/no response → Band 1-2
-- Ignore any "[FLAGGED_HALLUCINATION:...]" spans when scoring
+- Ignore "[FLAGGED_HALLUCINATION:...]" spans
 
-**CRITICAL - WEAKNESS FORMAT REQUIREMENTS:**
-✅ EVERY weakness MUST include a QUOTED EXAMPLE from the transcript:
-   Format: "Issue description. Example: '[exact quote from transcript]'"
-   Good: "Subject-verb disagreement. Example: 'The people was going there'"
-   Good: "Limited vocabulary range. Example: 'I feel happy' could be 'I feel elated'"
-❌ NEVER write vague statements like:
-   - "Some words might be mispronounced, but specific examples are not available"
-   - "Possible issues with intonation, though not explicitly evident"
-   - "There may be pronunciation errors"
-If you cannot provide a specific quoted example, DO NOT include that weakness.
+## 5. OUTPUT REQUIREMENTS (Token-Efficient)
 
-**CRITICAL - LEXICAL UPGRADES FORMAT (STRICTLY ENFORCED):**
-══════════════════════════════════════════════════════════════
-⚠️ The "context" field MUST contain the EXACT ORIGINAL phrase FROM THE TRANSCRIPT.
-⚠️ DO NOT include the upgraded word in the context - only the original words!
-⚠️ Copy-paste the EXACT phrase from the transcript where the word appeared.
+### 5A. REASONING-FIRST SCORING (Mandatory)
+Each criterion MUST include "justification" (max 20 words of evidence) BEFORE the band:
+✅ "justification": "Used 'part and parcel' correctly; hesitated 4 times in long turn"
+✅ "justification": "90s duration with only 95 words = slow pacing, not short answer"
 
-✅ CORRECT EXAMPLES:
-{"original": "good", "upgraded": "exceptional", "context": "The service was good"}
-{"original": "very", "upgraded": "extremely", "context": "It was very interesting"}
-{"original": "a lot of", "upgraded": "numerous", "context": "There are a lot of problems"}
+### 5B. WEAKNESS FORMAT
+Every weakness MUST have quoted evidence:
+✅ "Subject-verb error. Example: '[the people was going]'"
+❌ "May have pronunciation issues" (REJECTED - no evidence)
 
-❌ WRONG EXAMPLES (DO NOT DO THIS):
-{"original": "good", "upgraded": "exceptional", "context": "The service was exceptional"} <- WRONG: shows upgraded word
-{"original": "very", "upgraded": "extremely", "context": "It was extremely interesting"} <- WRONG: shows upgraded word
-{"original": "nice", "upgraded": "pleasant", "context": "a pleasant experience"} <- WRONG: shows upgraded word
+### 5C. FEEDBACK EFFICIENCY (Instead of full rewrites)
+Per question provide ONLY:
+- keyVocabUpgrades: 3 vocabulary improvements with context
+- oneGrammarFix: 1 specific grammatical correction
 
-VALIDATION RULE: The "context" field must contain the "original" word, NOT the "upgraded" word.
-If the context contains the upgraded word, your response is INVALID.
-══════════════════════════════════════════════════════════════
+### 5D. LEXICAL UPGRADES (10 minimum)
+Context MUST contain ORIGINAL word, NOT upgraded:
+✅ {"original": "good", "upgraded": "exceptional", "context": "The service was good"}
+❌ {"original": "good", "upgraded": "exceptional", "context": "exceptional service"} (WRONG)
 
-**CRITICAL - MODEL ANSWER WORD COUNT REQUIREMENTS (STRICTLY ENFORCED):**
-⚠️ PART 1: Each answer MUST be AT LEAST 50 words (aim for 55-65 words)
-⚠️ PART 2: Answer MUST be AT LEAST 180 words (aim for 190-210 words) - THIS IS MANDATORY. COUNT YOUR WORDS!
-⚠️ PART 3: Each answer MUST be AT LEAST 70 words (aim for 80-95 words)
-
-Part 2 is the "long turn" - the candidate speaks for 1-2 minutes. Your model answer MUST demonstrate this:
-- Cover ALL bullet points from the cue card
-- Include personal details and examples
-- Use varied vocabulary and sentence structures
-- Show natural elaboration and development of ideas
-
-**CRITICAL - LEXICAL UPGRADES REQUIREMENT:**
-⚠️ Provide AT LEAST 10 lexical_upgrades entries
-Each must have: original word/phrase, upgraded version, and context showing the ORIGINAL phrase as spoken
-
-WORD COUNTS AND UPGRADE COUNTS ARE STRICTLY ENFORCED. Short outputs are UNACCEPTABLE.
-
-**OUTPUT FORMAT (valid JSON only):**
+## 6. OUTPUT SCHEMA (Valid JSON)
 {
   "criteria": {
-    "fluency_coherence": {"band": <1-9>, "feedback": "<2 sentences>", "strengths": ["..."], "weaknesses": ["Issue. Example: '[quote]'"], "suggestions": ["..."]},
-    "lexical_resource": {"band": <1-9>, "feedback": "<2 sentences>", "strengths": ["..."], "weaknesses": ["Issue. Example: '[quote]'"], "suggestions": ["..."]},
-    "grammatical_range": {"band": <1-9>, "feedback": "<2 sentences>", "strengths": ["..."], "weaknesses": ["Issue. Example: '[quote]'"], "suggestions": ["..."]},
-    "pronunciation": {"band": <5-8>, "feedback": "...", "strengths": ["..."], "weaknesses": ["Specific issue with quoted example if evidence exists, otherwise actionable tip"], "suggestions": ["..."]}
+    "fluency_coherence": {"justification": "<20 words evidence>", "band": <1-9>, "feedback": "<2 sentences>", "strengths": ["..."], "weaknesses": ["Issue. Example: '[quote]'"], "suggestions": ["..."]},
+    "lexical_resource": {"justification": "<20 words evidence>", "band": <1-9>, "feedback": "<2 sentences>", "strengths": ["..."], "weaknesses": ["Issue. Example: '[quote]'"], "suggestions": ["..."]},
+    "grammatical_range": {"justification": "<20 words evidence>", "band": <1-9>, "feedback": "<2 sentences>", "strengths": ["..."], "weaknesses": ["Issue. Example: '[quote]'"], "suggestions": ["..."]},
+    "pronunciation": {"justification": "<20 words>", "band": <5-8>, "feedback": "...", "strengths": ["..."], "weaknesses": ["..."], "suggestions": ["..."]}
   },
-  "summary": "<2 sentence overall summary>",
-  "examiner_notes": "<1 sentence key observation>",
+  "summary": "<2 sentences>",
+  "examiner_notes": "<1 key observation>",
   "modelAnswers": [${modelAnswersReq}],
-  "lexical_upgrades": [{"original": "word", "upgraded": "better_word", "context": "EXACT phrase from transcript containing original word"}, ... (AT LEAST 10 ENTRIES)],
-  "part_notes": [],
+  "lexical_upgrades": [{"original": "...", "upgraded": "...", "context": "ORIGINAL phrase from transcript"}, ... (10+ entries)],
   "improvement_priorities": ["...", "..."],
   "strengths_to_maintain": ["..."]
 }
 
-FINAL VALIDATION CHECKLIST (ALL MUST PASS):
-1. ✓ Part 2 modelAnswer has 180+ words? COUNT THEM!
-2. ✓ All weaknesses have quoted examples from the transcript?
-3. ✓ Every lexical_upgrades "context" contains the "original" word (NOT the "upgraded" word)?
-4. ✓ At least 10 lexical_upgrades provided?
-5. ✓ No vague pronunciation claims without evidence?
-6. ✓ Context is EXACT quote from transcript, not a rewritten sentence?`;
+## 7. VALIDATION CHECKLIST
+1. ✓ Every criterion has "justification" with specific evidence?
+2. ✓ Duration > 90s Part 2 treated as "fully developed"?
+3. ✓ No safety-bias 5.5 scores without justification?
+4. ✓ All weaknesses have quoted transcript examples?
+5. ✓ Lexical upgrade contexts contain ORIGINAL words?
+6. ✓ Part 2 modelAnswer has 180+ words?`;
 }
 
 function getQuestionTextFromPayload(payload: any, partNumber: number, questionNumber: number, segmentKey: string): string {
