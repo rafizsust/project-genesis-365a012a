@@ -49,7 +49,6 @@ import { ApiErrorDescriptor } from '@/lib/apiErrors';
 import { cn } from '@/lib/utils';
 import { AudioLevelIndicator, AudioVolumeControl, AudioWaveformIndicator, SpeakingStateRestoreDialog } from '@/components/speaking';
 import { useFullscreenTest } from '@/hooks/useFullscreenTest';
-import { compressAudio } from '@/utils/audioCompressor';
 import { trimSilence } from '@/utils/audioSilenceTrimmer';
 import { useAdvancedSpeechAnalysis, SpeechAnalysisResult } from '@/hooks/useAdvancedSpeechAnalysis';
 
@@ -225,15 +224,15 @@ function AIPracticeSpeakingTest() {
       console.log(`[BackgroundUpload] Processing ${key} (${(blob.size / 1024).toFixed(1)}KB, ${duration.toFixed(1)}s)`);
 
       try {
-        // Step 1: Trim silence + compress to MP3
-        const mp3DataUrl = await toMp3DataUrl(blob, key);
+        // Step 1: Trim silence (no MP3 conversion to preserve quality)
+        const audioDataUrl = await toAudioDataUrl(blob, key);
 
         // Step 2: Upload to R2
         const { data: uploadResult, error: uploadError } = await supabase.functions.invoke('upload-speaking-audio', {
           body: {
             testId,
             partNumber: parseInt(key.match(/^part(\d)/)?.[1] || '1'),
-            audioData: { [key]: mp3DataUrl },
+            audioData: { [key]: audioDataUrl },
           },
         });
 
@@ -513,20 +512,22 @@ function AIPracticeSpeakingTest() {
       reader.readAsDataURL(blob);
     });
 
-  // Convert recordings to MP3 before sending to Gemini / storing in R2.
-  // First trims leading silence to prevent Whisper hallucinations, then compresses.
-  // This avoids WebM "0:00" metadata issues on some browsers and improves playback compatibility.
-  const toMp3DataUrl = async (blob: Blob, key: string) => {
+  // Convert recordings to audio data URL for upload to R2.
+  // Only trims silence - no MP3 conversion to preserve audio quality and save processing time.
+  // This preserves audio quality for Whisper transcription accuracy.
+  const toAudioDataUrl = async (blob: Blob, key: string) => {
     try {
-      // Step 1: Trim leading AND trailing silence to prevent STT hallucinations.
+      // Trim leading AND trailing silence to prevent STT hallucinations.
       // Trailing silence is the most common cause of "extra" invented sentences.
       const { blob: trimmedBlob, trimmedLeadingMs, trimmedTrailingMs } = await trimSilence(blob, {
         trimTrailing: true,
-        maxLeadingTrim: 3,
+        maxLeadingTrim: 1.5,
         maxTrailingTrim: 8,
-        // Slightly conservative defaults; we prefer keeping breath/noise over clipping words.
+        // Conservative defaults to prevent clipping first syllables
         minSilenceDuration: 0.25,
         silenceThreshold: 0.01,
+        trailingPadding: 0.5,
+        minAudioDuration: 2.0,
       });
       if (trimmedLeadingMs > 0 || trimmedTrailingMs > 0) {
         console.log(
@@ -534,12 +535,10 @@ function AIPracticeSpeakingTest() {
         );
       }
       
-      // Step 2: Compress to MP3
-      const file = new File([trimmedBlob], `${key}.audio`, { type: trimmedBlob.type || 'audio/webm' });
-      const mp3File = await compressAudio(file);
-      return await blobToDataUrl(mp3File);
+      // Return trimmed audio directly - no MP3 conversion for better quality
+      return await blobToDataUrl(trimmedBlob);
     } catch (err) {
-      console.warn('[AIPracticeSpeakingTest] MP3 conversion failed, falling back to original blob:', err);
+      console.warn('[AIPracticeSpeakingTest] Audio processing failed, falling back to original blob:', err);
       return await blobToDataUrl(blob);
     }
   };
@@ -1401,16 +1400,13 @@ function AIPracticeSpeakingTest() {
             if (blob.size === 0) continue;
             
             try {
-              const mp3Blob = await toMp3DataUrl(blob, key).then(async (dataUrl) => {
-                const response = await fetch(dataUrl);
-                return response.blob();
-              });
+              const audioDataUrl = await toAudioDataUrl(blob, key);
               
               await supabase.functions.invoke('upload-speaking-audio', {
                 body: {
                   testId,
                   partNumber: seg.partNumber,
-                  audioData: { [key]: await blobToDataUrl(mp3Blob) },
+                  audioData: { [key]: audioDataUrl },
                   updateResult: true, // Update ai_practice_results with audio URLs after upload
                 },
               });
@@ -1487,16 +1483,13 @@ function AIPracticeSpeakingTest() {
           totalItems: totalAudioFiles 
         });
 
-        // Convert to MP3 for compatibility
-        let mp3Blob: Blob;
+        // Process audio (trim silence)
+        let processedAudioDataUrl: string;
         try {
-          mp3Blob = await toMp3DataUrl(blob, key).then(async (dataUrl) => {
-            const response = await fetch(dataUrl);
-            return response.blob();
-          });
+          processedAudioDataUrl = await toAudioDataUrl(blob, key);
         } catch (convErr) {
-          console.error(`[AIPracticeSpeakingTest] Conversion error for ${key}:`, convErr);
-          uploadErrors.push({ key, error: 'Audio conversion failed' });
+          console.error(`[AIPracticeSpeakingTest] Audio processing error for ${key}:`, convErr);
+          uploadErrors.push({ key, error: 'Audio processing failed' });
           continue;
         }
 
@@ -1522,7 +1515,7 @@ function AIPracticeSpeakingTest() {
             body: {
               testId,
               partNumber: seg.partNumber,
-              audioData: { [key]: await blobToDataUrl(mp3Blob) },
+              audioData: { [key]: processedAudioDataUrl },
             },
           });
 
