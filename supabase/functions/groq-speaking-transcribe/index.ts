@@ -16,6 +16,10 @@ import { getFromR2 } from "../_shared/r2Client.ts";
  * - Confidence scores for pronunciation estimation
  * - NO_SPEECH detection to filter out silent gaps / hallucinations
  * - Optimized timing: 1s delay (safe for up to 60 requests/min, Groq allows 20 RPM)
+ * 
+ * IMPORTANT: Groq Whisper API does NOT return word-level probability scores.
+ * All word.probability values are undefined/0. We only use segment-level metrics
+ * (no_speech_prob, compression_ratio, avg_logprob) which ARE reliable.
  */
 
 const corsHeaders = {
@@ -37,17 +41,6 @@ const NO_SPEECH_THRESHOLD = 0.5;
 
 // Compression ratio above which segments are likely hallucinations
 const COMPRESSION_RATIO_THRESHOLD = 2.4;
-
-// Threshold for filtering words that appear after long gaps with low confidence
-// CONSERVATIVE: Only filter truly suspicious words after very long gaps
-// Raised gap to 4s and lowered confidence to 0.35 to preserve legitimate speech after pauses
-// User testing showed 3-second pauses + "I believe" were being wrongly filtered
-const POST_GAP_CONFIDENCE_THRESHOLD = 0.35;
-const GAP_DURATION_THRESHOLD = 4.0; // seconds - increased from 2.0 to avoid filtering speech after normal pauses
-
-// How many words after a gap to protect from aggressive filtering
-// First 3 words after resuming speech often have lower confidence at transition points
-const POST_GAP_PROTECTED_WORDS = 3;
 
 // Hallucination patterns - known Whisper/Distil-Whisper artifacts
 const HALLUCINATION_PATTERNS = [
@@ -88,6 +81,17 @@ const HALLUCINATION_START_PHRASES = [
   /^welcome\s+to\s+the\s+ielts\s+speaking\s+test\.?\s*/gi,
   /^this\s+is\s+an?\s+ielts\s+speaking\.?\s*/gi,
 ];
+
+// Known hallucination WORDS that Whisper generates in silence
+// These are YouTube/podcast artifacts, NOT natural speech
+const HALLUCINATION_WORDS = new Set([
+  'subscribe',
+  'goodbye',
+  'bye-bye',
+  'bye',
+  'subtitles',
+  'captions',
+]);
 
 // ============================================================================
 // CONSERVATIVE TRAILING HALLUCINATION DETECTION
@@ -151,90 +155,44 @@ function containsHallucinationPatterns(text: string): boolean {
 }
 
 /**
- * Filters out words that appear after long gaps (2+ seconds) with low confidence.
- * These are typically Whisper hallucinations that occur during silence.
+ * BULLETPROOF word filtering - NO probability-based filtering.
+ * 
+ * CRITICAL: Groq Whisper API does NOT return word-level probability scores.
+ * All word.probability values are undefined/0. Previous implementations that
+ * filtered by probability were incorrectly removing ALL words.
+ * 
+ * This function ONLY filters based on:
+ * 1. Known hallucination words (subscribe, goodbye, etc.)
+ * 2. Words extending beyond audio duration (handled separately)
+ * 
+ * It PRESERVES:
+ * - First words (even "I", "Well", "Yeah")
+ * - Words after pauses
+ * - Filler words (um, uh, like, you know)
+ * - All legitimate speech
  */
-function filterGapHallucinations(words: WhisperWord[]): WhisperWord[] {
+function filterKnownHallucinationWords(words: WhisperWord[]): WhisperWord[] {
   if (words.length === 0) return words;
   
   const filtered: WhisperWord[] = [];
-  let lastValidEnd = 0;
-  let wordsAfterGap = 0; // Track how many words since last gap
-  let inPostGapProtection = false; // Are we in the protection window?
   
   for (let i = 0; i < words.length; i++) {
     const word = words[i];
-    const prob = typeof word.probability === 'number' ? word.probability : 0;
+    const lowerWord = word.word.toLowerCase().trim().replace(/[.,!?]/g, '');
     
-    // First word is always included (unless it's extremely low confidence)
-    if (i === 0) {
-      if (prob >= 0.25) { // Lowered from 0.3 to be more permissive
-        filtered.push(word);
-        lastValidEnd = word.end;
-      } else {
-        console.log(`[groq-speaking-transcribe] Filtering first word (conf=${prob.toFixed(2)}): "${word.word}"`);
-      }
+    // Only filter KNOWN hallucination words
+    if (HALLUCINATION_WORDS.has(lowerWord)) {
+      console.log(`[groq-speaking-transcribe] Filtering known hallucination word: "${word.word}"`);
       continue;
     }
     
-    // Calculate gap from last valid word
-    const gap = word.start - lastValidEnd;
-    
-    // Detect if we just crossed a significant gap
-    if (gap > GAP_DURATION_THRESHOLD) {
-      inPostGapProtection = true;
-      wordsAfterGap = 0;
-      console.log(`[groq-speaking-transcribe] Detected ${gap.toFixed(1)}s gap, entering protection mode for next ${POST_GAP_PROTECTED_WORDS} words`);
-    }
-    
-    // Track words after gap for protection
-    if (inPostGapProtection) {
-      wordsAfterGap++;
-      if (wordsAfterGap > POST_GAP_PROTECTED_WORDS) {
-        inPostGapProtection = false;
-      }
-    }
-    
-    // PROTECTED: First N words after a gap are only filtered if VERY low confidence
-    // This prevents filtering legitimate speech like "I believe" after a pause
-    if (inPostGapProtection && wordsAfterGap <= POST_GAP_PROTECTED_WORDS) {
-      // Only filter if extremely low confidence (likely true hallucination)
-      if (prob < 0.2) {
-        console.log(`[groq-speaking-transcribe] Filtering protected post-gap word (extremely low conf=${prob.toFixed(2)}): "${word.word}"`);
-        continue;
-      }
-      // Check for obvious hallucination words even in protection
-      const lowerWord = word.word.toLowerCase().trim();
-      const obviousHallucinations = ['subscribe', 'bye', 'goodbye'];
-      if (obviousHallucinations.some(h => lowerWord.includes(h))) {
-        console.log(`[groq-speaking-transcribe] Filtering obvious hallucination in protection: "${word.word}"`);
-        continue;
-      }
-      // Otherwise, keep the word (protected)
-      filtered.push(word);
-      lastValidEnd = word.end;
-      continue;
-    }
-    
-    // UNPROTECTED: Apply normal gap filtering (only for words AFTER the protection window)
-    if (gap > GAP_DURATION_THRESHOLD && prob < POST_GAP_CONFIDENCE_THRESHOLD) {
-      console.log(`[groq-speaking-transcribe] Filtering post-gap hallucination (gap=${gap.toFixed(1)}s, conf=${prob.toFixed(2)}): "${word.word}"`);
-      continue;
-    }
-    
-    // Check for common hallucination words after gaps (not in protection)
-    if (gap > GAP_DURATION_THRESHOLD) {
-      const lowerWord = word.word.toLowerCase().trim();
-      const hallucinationWords = ['thanks', 'thank', 'subscribe', 'bye', 'goodbye'];
-      // Removed 'you' and 'like' - these are too common in legitimate speech
-      if (hallucinationWords.some(h => lowerWord.includes(h))) {
-        console.log(`[groq-speaking-transcribe] Filtering common hallucination after gap: "${word.word}"`);
-        continue;
-      }
-    }
-    
+    // Keep everything else - including first words, words after pauses, fillers
     filtered.push(word);
-    lastValidEnd = word.end;
+  }
+  
+  // Log if we filtered anything
+  if (filtered.length < words.length) {
+    console.log(`[groq-speaking-transcribe] Filtered ${words.length - filtered.length} hallucination words, kept ${filtered.length}`);
   }
   
   return filtered;
@@ -686,9 +644,10 @@ async function transcribeWithWhisper(
     }
     
     // Additional check: very short text in longer segments is suspicious
+    // BUT only if no_speech_prob is also elevated (to avoid false positives)
     const wordCount = (s.text?.split(/\s+/) || []).length;
-    if (segmentDuration > 3 && wordCount <= 2 && noSpeechProb > 0.2) {
-      console.log(`[groq-speaking-transcribe] Filtering suspicious short segment (${wordCount}w in ${segmentDuration.toFixed(1)}s): "${s.text}"`);
+    if (segmentDuration > 3 && wordCount <= 2 && noSpeechProb > 0.3) {
+      console.log(`[groq-speaking-transcribe] Filtering suspicious short segment (${wordCount}w in ${segmentDuration.toFixed(1)}s, no_speech=${noSpeechProb.toFixed(2)}): "${s.text}"`);
       return false;
     }
     
@@ -729,13 +688,23 @@ async function transcribeWithWhisper(
     words = (result as any).words as WhisperWord[];
   }
 
-  // Apply word-gap hallucination filter - removes low-confidence words after 2+ second gaps
-  words = filterGapHallucinations(words);
+  // ============================================================================
+  // BULLETPROOF WORD FILTERING
+  // ============================================================================
+  // CRITICAL: Groq does NOT return word.probability scores (they're all undefined/0).
+  // We ONLY filter:
+  // 1. Known hallucination words (subscribe, goodbye, etc.)
+  // 2. Words extending beyond audio duration
+  // We DO NOT filter based on confidence/probability (it's not available)
+  // ============================================================================
+  
+  // Apply known hallucination word filter (NOT probability-based)
+  words = filterKnownHallucinationWords(words);
 
-  // Log if words were filtered
+  // Log original vs filtered word count
   const originalWordCount = filteredSegments.reduce((sum, s) => sum + (s.words?.length || 0), 0);
   if (words.length < originalWordCount) {
-    console.log(`[groq-speaking-transcribe] Filtered ${originalWordCount - words.length} post-gap hallucination words`);
+    console.log(`[groq-speaking-transcribe] Filtered ${originalWordCount - words.length} hallucination words`);
   }
 
   // ============================================================================
@@ -795,6 +764,7 @@ async function transcribeWithWhisper(
     : 0;
 
   // Calculate average confidence (word-level if available)
+  // NOTE: Groq doesn't provide word probabilities, so this will be 0
   const avgConfidence = words.length > 0
     ? words.reduce((sum, w) => sum + (w.probability || 0), 0) / words.length
     : 0;
