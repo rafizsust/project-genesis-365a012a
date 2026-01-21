@@ -646,7 +646,16 @@ async function transcribeWithWhisper(
   }
 
   // Extract all words from filtered segments
-  let words: WhisperWord[] = filteredSegments.flatMap(s => s.words || []);
+  // NOTE: Some providers/models do not return word-level timestamps/probabilities
+  // inside segments (or at all). Our previous implementation rebuilt the final
+  // transcript ONLY from `words`, which caused EMPTY transcripts when `words`
+  // is missing.
+  let words: WhisperWord[] = filteredSegments.flatMap(s => Array.isArray(s.words) ? s.words : []);
+
+  // Fallback: Some implementations may return words at the root level.
+  if (words.length === 0 && Array.isArray((result as any).words)) {
+    words = (result as any).words as WhisperWord[];
+  }
 
   // Apply word-gap hallucination filter - removes low-confidence words after 2+ second gaps
   words = filterGapHallucinations(words);
@@ -658,23 +667,37 @@ async function transcribeWithWhisper(
   }
 
   // ============================================================================
-  // BULLETPROOF TRAILING HALLUCINATION REMOVAL
+  // FINAL TRANSCRIPT TEXT (NEVER EMPTY DUE TO MISSING WORD TIMESTAMPS)
   // ============================================================================
-  // Apply duration-based trailing hallucination filter
+  // Prefer word-derived text when available (enables trailing hallucination removal).
+  // Otherwise, fall back to the cleaned segment text.
+
   const audioDuration = result.duration || 0;
-  const wordsBeforeTrailingFilter = words.length;
-  words = filterTrailingHallucinationsByDuration(words, audioDuration);
-  
-  if (words.length < wordsBeforeTrailingFilter) {
-    console.log(`[groq-speaking-transcribe] Duration filter removed ${wordsBeforeTrailingFilter - words.length} trailing words`);
+
+  // Base text derived from segment text filtering (works even without word timestamps)
+  const baseText = (cleanedText || filteredText || result.text || '').trim();
+
+  let finalTextFromWords = '';
+  if (words.length > 0) {
+    // Apply duration-based trailing hallucination filter
+    const wordsBeforeTrailingFilter = words.length;
+    words = filterTrailingHallucinationsByDuration(words, audioDuration);
+    
+    if (words.length < wordsBeforeTrailingFilter) {
+      console.log(`[groq-speaking-transcribe] Duration filter removed ${wordsBeforeTrailingFilter - words.length} trailing words`);
+    }
+
+    // Apply sentence-level trailing hallucination detection
+    finalTextFromWords = words.map(w => w.word).join(' ').trim();
+    const sentenceFilterResult = filterTrailingSentenceHallucinations(finalTextFromWords, words, audioDuration);
+    words = sentenceFilterResult.words;
+    finalTextFromWords = sentenceFilterResult.text;
+    finalTextFromWords = String(finalTextFromWords || '').trim();
   }
-  
-  // Apply sentence-level trailing hallucination detection
-  let finalText = words.map(w => w.word).join(' ').trim();
-  const sentenceFilterResult = filterTrailingSentenceHallucinations(finalText, words, audioDuration);
-  words = sentenceFilterResult.words;
-  finalText = sentenceFilterResult.text;
-  
+
+  // Choose final text, ensuring we NEVER drop to empty just because word timestamps are missing
+  let finalText = (finalTextFromWords || baseText).trim();
+
   // Final cleanup: apply phrase-based filters to the final text
   for (const pattern of HALLUCINATION_START_PHRASES) {
     finalText = finalText.replace(pattern, '');
@@ -683,20 +706,25 @@ async function transcribeWithWhisper(
     finalText = finalText.replace(pattern, '');
   }
   finalText = finalText.trim();
-  
+
+  // Safety: if aggressive filtering ever produces empty, fall back to baseText
+  if (!finalText && baseText) {
+    finalText = baseText;
+  }
+
   // Log final result comparison
   if (finalText !== result.text.trim()) {
     console.log(`[groq-speaking-transcribe] Final cleaned transcript: "${result.text}" -> "${finalText}"`);
   }
 
-  // Calculate average confidence
-  const avgConfidence = words.length > 0
-    ? words.reduce((sum, w) => sum + (w.probability || 0), 0) / words.length
-    : 0;
-
   // Calculate average logprob from filtered segments
   const avgLogprob = filteredSegments.length > 0
     ? filteredSegments.reduce((sum, s) => sum + (s.avg_logprob || 0), 0) / filteredSegments.length
+    : 0;
+
+  // Calculate average confidence (word-level if available)
+  const avgConfidence = words.length > 0
+    ? words.reduce((sum, w) => sum + (w.probability || 0), 0) / words.length
     : 0;
 
   // Detect filler words
@@ -706,14 +734,17 @@ async function transcribeWithWhisper(
 
   // Detect long pauses (gaps > 2 seconds between words)
   const longPauses: { start: number; end: number; duration: number }[] = [];
-  for (let i = 1; i < words.length; i++) {
-    const gap = words[i].start - words[i - 1].end;
-    if (gap > 2.0) {
-      longPauses.push({
-        start: words[i - 1].end,
-        end: words[i].start,
-        duration: gap,
-      });
+  // Only possible when we have timestamped words
+  if (words.length > 1) {
+    for (let i = 1; i < words.length; i++) {
+      const gap = words[i].start - words[i - 1].end;
+      if (gap > 2.0) {
+        longPauses.push({
+          start: words[i - 1].end,
+          end: words[i].start,
+          duration: gap,
+        });
+      }
     }
   }
 
@@ -734,7 +765,10 @@ async function transcribeWithWhisper(
     avgLogprob,
     fillerWords,
     longPauses,
-    wordCount: words.length,
+    // IMPORTANT: If word timestamps are missing, fall back to text-based word counting.
+    wordCount: words.length > 0
+      ? words.length
+      : (finalText ? finalText.trim().split(/\s+/).filter(Boolean).length : 0),
     noSpeechProb: avgNoSpeechProb,
   };
 }
