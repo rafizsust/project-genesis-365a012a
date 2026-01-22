@@ -513,29 +513,32 @@ function AIPracticeSpeakingTest() {
     });
 
   // Convert recordings to audio data URL for upload to R2.
-  // Only trims silence - no MP3 conversion to preserve audio quality and save processing time.
-  // This preserves audio quality for Whisper transcription accuracy.
+  // Uses industry-standard preprocessing: normalization, 16kHz resampling, high-pass filter.
+  // Then trims silence with conservative settings to preserve speech.
   const toAudioDataUrl = async (blob: Blob, key: string) => {
     try {
-      // Trim leading AND trailing silence to prevent STT hallucinations.
-      // Trailing silence is the most common cause of "extra" invented sentences.
-      const { blob: trimmedBlob, trimmedLeadingMs, trimmedTrailingMs } = await trimSilence(blob, {
+      // Step 1: Preprocess audio (normalize volume, resample to 16kHz, high-pass filter)
+      // This is CRITICAL for preventing missing first words
+      const { preprocessAudioForWhisper } = await import('@/utils/audioPreprocessor');
+      const preprocessedBlob = await preprocessAudioForWhisper(blob);
+      
+      // Step 2: Trim silence with CONSERVATIVE settings
+      const { blob: trimmedBlob, trimmedLeadingMs, trimmedTrailingMs } = await trimSilence(preprocessedBlob, {
         trimTrailing: true,
-        maxLeadingTrim: 1.5,
-        maxTrailingTrim: 8,
-        // Conservative defaults to prevent clipping first syllables
-        minSilenceDuration: 0.25,
-        silenceThreshold: 0.01,
+        maxLeadingTrim: 0.8,        // Reduced from 1.5 - more conservative
+        maxTrailingTrim: 5,         // Reduced from 8
+        minSilenceDuration: 0.3,    // Increased from 0.25
+        silenceThreshold: 0.015,    // Increased from 0.01 - less aggressive
         trailingPadding: 0.5,
-        minAudioDuration: 2.0,
+        minAudioDuration: 1.5,      // Reduced from 2.0
       });
+      
       if (trimmedLeadingMs > 0 || trimmedTrailingMs > 0) {
         console.log(
           `[AIPracticeSpeakingTest] Trimmed ${trimmedLeadingMs}ms leading + ${trimmedTrailingMs}ms trailing silence from ${key}`
         );
       }
       
-      // Return trimmed audio directly - no MP3 conversion for better quality
       return await blobToDataUrl(trimmedBlob);
     } catch (err) {
       console.warn('[AIPracticeSpeakingTest] Audio processing failed, falling back to original blob:', err);
