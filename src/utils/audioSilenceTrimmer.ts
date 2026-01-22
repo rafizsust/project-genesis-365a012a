@@ -38,15 +38,15 @@ export interface TrimConfig {
 }
 
 const DEFAULT_CONFIG: Required<TrimConfig> = {
-  silenceThreshold: 0.01,          // Slightly higher threshold for more reliable detection
+  silenceThreshold: 0.015,         // Increased from 0.01 - less aggressive
   endThresholdMultiplier: 0.5,     // 50% more sensitive for endings
   windowSize: 0.03,                // 30ms windows for finer granularity
-  minSilenceDuration: 0.3,         // Require 300ms silence before trimming
+  minSilenceDuration: 0.3,         // Increased from 0.25 - require longer silence
   trimTrailing: false,             // Default OFF - safer
-  maxLeadingTrim: 1.5,             // Max 1.5s leading trim - more conservative
-  maxTrailingTrim: 5,              // Max 5s trailing trim
+  maxLeadingTrim: 0.8,             // Reduced from 1.5 - more conservative
+  maxTrailingTrim: 4,              // Reduced from 5
   trailingPadding: 0.5,            // 500ms padding - CRITICAL for Whisper
-  minAudioDuration: 2.0,           // Never trim below 2 seconds
+  minAudioDuration: 1.5,           // Reduced from 2.0
   detectFadeOut: true,             // Detect gradual volume decrease
 };
 
@@ -103,8 +103,8 @@ function findSpeechStart(
     if (hasSound) {
       if (consecutiveSilentSamples >= minSilenceSamples) {
         // Return position slightly before detected sound (safety margin)
-        // Increased to windowSamples * 3 to prevent clipping first syllables
-        const safetyMargin = Math.floor(windowSamples * 3);
+        // Increased to windowSamples * 5 to prevent clipping first syllables
+        const safetyMargin = Math.floor(windowSamples * 5);
         return Math.max(0, i - safetyMargin);
       }
       return 0; // Sound found early, don't trim
